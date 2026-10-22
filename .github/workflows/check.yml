@@ -38,6 +38,10 @@ jobs:
           CHECK_WORKER: "https://green-rice-2c18.zxm378t0.workers.dev/check?sstp=vpn:vpn@"
           CHECK_CONCURRENCY: "32"
           CHECK_TIMEOUT: "90"
+          # Worker 自定义域 (订阅连接地址/SNI 用; edgetunnel 部署在 edt-gate)
+          EDT_DOMAIN: "vpn.cnzxmdd.cc.cd"
+          # 优选入口轮换池 (bestcf 2026-10-22 实测延迟 129-213ms; 首位为自有域名直连)
+          SUB_ENTRY: "vpn.cnzxmdd.cc.cd:443,ping.pe:443,www.postman.com:443,www.ox.ac.uk:443,www.speedtest.net:443,linear.app:443,shabak.gov.il:443,newsroom.avalara.com:443,constitution.congress.gov:443,www.elysee.fr:443,www.giannidelprete.it:443"
           # 本仓库 Pages 固定地址 (生成文件里的注释引用)
           CHAIN_URL: "https://funnyday-py.github.io/ggboom/chains.txt"
           HOSTS_URL: "https://funnyday-py.github.io/ggboom/hosts.txt"
