@@ -523,7 +523,7 @@ def build_hosts_text(data):
 
 # edgetunnel 完整订阅 (vless://) 配置
 EDT_UUID = os.environ.get("EDT_UUID", "f2afba09-d83b-43d1-b2df-f149941c4623")
-EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "green-rice-2c18.zxm378t0.workers.dev")
+EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "zxm.cnzxmdd.cc.cd")
 EDT_FINGERPRINT = os.environ.get("EDT_FINGERPRINT", "chrome")
 SUB_URL = os.environ.get("SUB_URL", "https://jerylihub.github.io/gate/sub.txt")
 
@@ -562,18 +562,17 @@ def _socks5_account(address, default_port=80):
 
 def build_sub_text(data):
     """生成 edgetunnel 完整 vless:// 订阅 (链式代理编码在 path)。
-    连接地址用优选入口域名循环分配 (workers.dev 在国内被墙, 直连必然测速 -1);
-    SNI/Host 保持 Worker 域名不变, CDN 按 Host 头路由到 Worker。"""
+    连接地址默认用 Worker 自定义域 (SNI 不再是 workers.dev, 避开 GFW 的 SNI 阻断);
+    如需优选入口可设 SUB_ENTRY 环境变量 (逗号分隔 host:port)。"""
     countries = data["countries"]
-    # 优选入口池: 与 hosts.txt 同源, 可用 SUB_ENTRY 环境变量覆盖(逗号分隔 host:port)
     _sub_entry = os.environ.get("SUB_ENTRY", "").strip()
-    edge = [e.strip() for e in _sub_entry.split(",") if e.strip()] or EDGE_HOSTS
+    edge = [e.strip() for e in _sub_entry.split(",") if e.strip()] or [f"{EDT_DOMAIN}:443"]
     lines = [
         "# edgetunnel 完整订阅 (vless://) —— 填进后台「订阅链接」URL",
         f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
         f"# 固定地址: {SUB_URL}",
         f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
-        f"# 连接地址: 优选入口域名循环分配 ({len(edge)} 个), 解决 workers.dev 被墙导致的测速 -1",
+        f"# 连接地址: {', '.join(edge)}",
         "# 名字固定; $sstp:// 链式代理(编码在 path)每 30 分钟自动更换",
         "# 账号密码固定 vpn:vpn ; 节点端口已编码进 path",
         "# ========================================================",
