@@ -562,13 +562,18 @@ def _socks5_account(address, default_port=80):
 
 def build_sub_text(data):
     """生成 edgetunnel 完整 vless:// 订阅 (链式代理编码在 path)。
-    填进 edgetunnel 后台「订阅链接」URL, 客户端定时拉取即可自动轮换。"""
+    连接地址用优选入口域名循环分配 (workers.dev 在国内被墙, 直连必然测速 -1);
+    SNI/Host 保持 Worker 域名不变, CDN 按 Host 头路由到 Worker。"""
     countries = data["countries"]
+    # 优选入口池: 与 hosts.txt 同源, 可用 SUB_ENTRY 环境变量覆盖(逗号分隔 host:port)
+    _sub_entry = os.environ.get("SUB_ENTRY", "").strip()
+    edge = [e.strip() for e in _sub_entry.split(",") if e.strip()] or EDGE_HOSTS
     lines = [
         "# edgetunnel 完整订阅 (vless://) —— 填进后台「订阅链接」URL",
         f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
         f"# 固定地址: {SUB_URL}",
-        f"# 节点域名: {EDT_DOMAIN} (传输 ws / TLS / fingerprint {EDT_FINGERPRINT})",
+        f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
+        f"# 连接地址: 优选入口域名循环分配 ({len(edge)} 个), 解决 workers.dev 被墙导致的测速 -1",
         "# 名字固定; $sstp:// 链式代理(编码在 path)每 30 分钟自动更换",
         "# 账号密码固定 vpn:vpn ; 节点端口已编码进 path",
         "# ========================================================",
@@ -589,14 +594,20 @@ def build_sub_text(data):
                 n.get("host") or "",
             ),
         )
+        _idx = 0
         for i, n in enumerate(nodes, 1):
             name = f"{zh}-{i:02d}"
             chain = {"type": "sstp", **_socks5_account(f"vpn:vpn@{n['host']}:{n['port']}", 443)}
             chain_json = json.dumps(chain, separators=(",", ":"))
             enc = _b64_secret_encode(chain_json, EDT_UUID)
             path = quote("/video/" + enc, safe="")
+            entry = edge[_idx % len(edge)]
+            _idx += 1
+            e_host, e_port = (entry.split(":") + ["443"])[:2]
+            if not e_port.isdigit():
+                e_host, e_port = entry, "443"
             link = (
-                f"vless://{EDT_UUID}@{EDT_DOMAIN}:443?security=tls&type=ws"
+                f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
                 f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
                 f"&path={path}&encryption=none&alpn=#{quote(name, safe='')}"
             )
