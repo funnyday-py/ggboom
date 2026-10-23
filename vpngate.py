@@ -581,6 +581,35 @@ def build_sub_text(data):
         countries.items(),
         key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])),
     )
+
+    def _parse_entry(entry):
+        e_host, e_port = (entry.split(":") + ["443"])[:2]
+        if not e_port.isdigit():
+            e_host, e_port = entry, "443"
+        return e_host, e_port
+
+    def _build_link(n, name, entry):
+        """单节点的 vless:// 链接: 连接地址=入口, SNI/Host=Worker 域, 链式参数编码在 path。"""
+        chain = {"type": "sstp", **_socks5_account(f"vpn:vpn@{n['host']}:{n['port']}", 443)}
+        enc = _b64_secret_encode(json.dumps(chain, separators=(",", ":")), EDT_UUID)
+        e_host, e_port = _parse_entry(entry)
+        return (
+            f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
+            f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
+            f"&path={quote('/video/' + enc, safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
+        )
+
+    # 极速组: 按链路握手延迟升序取前 8 个, 不分国家/住宅机房 (追求速度优先用这组)
+    all_nodes = [n for grp in countries.values() for n in grp["nodes"]]
+    fastest = sorted(
+        all_nodes, key=lambda n: (n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("host") or "")
+    )[:8]
+    if fastest:
+        lines.append("")
+        lines.append("# ---- 极速 TOP8 (握手延迟升序, 不限国家与住宅/机房; 追求速度优先选这组) ----")
+        for i, n in enumerate(fastest, 1):
+            lines.append(_build_link(n, f"极速-{i:02d}", edge[(i - 1) % len(edge)]))
+
     for cname, grp in ordered:
         code = str(grp.get("code") or "?").upper()
         zh = COUNTRY_ZH.get(code) or (code if code and code != "?" else cname)
@@ -596,21 +625,9 @@ def build_sub_text(data):
         _idx = 0
         for i, n in enumerate(nodes, 1):
             name = f"{zh}-{i:02d}"
-            chain = {"type": "sstp", **_socks5_account(f"vpn:vpn@{n['host']}:{n['port']}", 443)}
-            chain_json = json.dumps(chain, separators=(",", ":"))
-            enc = _b64_secret_encode(chain_json, EDT_UUID)
-            path = quote("/video/" + enc, safe="")
             entry = edge[_idx % len(edge)]
             _idx += 1
-            e_host, e_port = (entry.split(":") + ["443"])[:2]
-            if not e_port.isdigit():
-                e_host, e_port = entry, "443"
-            link = (
-                f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
-                f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
-                f"&path={path}&encryption=none&alpn=#{quote(name, safe='')}"
-            )
-            lines.append(link)
+            lines.append(_build_link(n, name, entry))
     return "\n".join(lines) + "\n"
 
 
