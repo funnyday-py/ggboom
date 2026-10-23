@@ -44,9 +44,9 @@ jobs:
           SUB_URL: "https://funnyday-py.github.io/ggboom/sub.txt"
           # Worker 自定义域 (edgetunnel 部署在 edt-gate)
           EDT_DOMAIN: "vpn.cnzxmdd.cc.cd"
-          # 优选入口池 (bestcf 2026-10-22 实测, 联通 IPv4, 延迟<=240ms; 首位为直连域名)
-          SUB_ENTRY: "vpn.cnzxmdd.cc.cd:443,ping.pe:443,www.postman.com:443,www.ox.ac.uk:443,www.speedtest.net:443,shabak.gov.il:443,www.shopify.com:443,chrono24.com:443,www.visa.com.au:443"
-          EDGE_HOSTS: "ping.pe:443,www.postman.com:443,www.ox.ac.uk:443,www.speedtest.net:443,shabak.gov.il:443,www.shopify.com:443,chrono24.com:443,www.visa.com.au:443"
+          # 优选入口池 (2026-10-23 客户端实测存活: 4 入口轮换; 首位为直连域名)
+          SUB_ENTRY: "vpn.cnzxmdd.cc.cd:443,www.postman.com:443,www.ox.ac.uk:443,www.speedtest.net:443"
+          EDGE_HOSTS: "www.postman.com:443,www.ox.ac.uk:443,www.speedtest.net:443"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
