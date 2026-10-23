@@ -44,10 +44,12 @@ jobs:
           SUB_URL: "https://funnyday-py.github.io/ggboom/sub.txt"
           # Worker 自定义域 (edgetunnel 部署在 edt-gate)
           EDT_DOMAIN: "vpn.cnzxmdd.cc.cd"
-          # 优选入口池 (2026-10-23 实测排序: 前 5 为借用域名+CF Anycast IP, 末位为自有直连兜底)
-          # IP 来自 ludas114343/cf-speedtest-sub (纯 AS13335 Anycast, 不依赖第三方域名, 每 4h 更新)
-          SUB_ENTRY: "www.postman.com:443,104.17.170.218:443,104.17.116.123:443,www.speedtest.net:443,104.24.0.1:443,104.17.104.166:443,www.ox.ac.uk:443,vpn.cnzxmdd.cc.cd:443"
-          EDGE_HOSTS: "www.postman.com:443,104.17.170.218:443,104.17.116.123:443,www.speedtest.net:443,104.24.0.1:443"
+          # 优选入口池: 域名入口在此配置; CF Anycast 纯 IP 由脚本每次自动拉取并追加
+          #   IP 源: ludas114343/cf-speedtest-sub (每 4h 更新, 只含 CF 官方网段, 白名单校验)
+          #   拉取失败自动回退到 vpngate.py 内置的 4 个 IP
+          SUB_ENTRY: "www.postman.com:443,www.speedtest.net:443,www.ox.ac.uk:443,vpn.cnzxmdd.cc.cd:443"
+          EDGE_HOSTS: "www.postman.com:443,www.speedtest.net:443,www.ox.ac.uk:443"
+          CF_IP_LIMIT: "4"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |

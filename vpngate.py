@@ -468,14 +468,115 @@ EDGE_HOSTS = [
 
 HOSTS_URL = os.environ.get("HOSTS_URL", "https://funnyday-py.github.io/ggboom/hosts.txt")
 
+# ---------------------------------------------------------------------------
+# 自动优选 IP 源
+#   纯 Cloudflare Anycast 地址, 对方每 4 小时更新一次; 拉取失败回退到内置列表。
+#   每次跑 workflow 拉一次, 所以 IP 失效会自动被下一批替换, 不用手工维护。
+# ---------------------------------------------------------------------------
+CF_IP_SOURCE = os.environ.get(
+    "CF_IP_SOURCE",
+    "https://raw.githubusercontent.com/ludas114343/cf-speedtest-sub/main/addressesapi.txt",
+)
+CF_IP_LIMIT = max(0, int(os.environ.get("CF_IP_LIMIT", "4") or 4))
+CF_IP_FALLBACK = [
+    "104.17.170.218:443",
+    "104.17.116.123:443",
+    "104.24.0.1:443",
+    "104.17.104.166:443",
+]
+# Cloudflare 官方网段白名单: 源被污染时不至于把第三方 VPS 混进入口池
+CF_CIDRS = [
+    "104.16.0.0/13", "104.24.0.0/14", "104.31.0.0/16",
+    "172.64.0.0/13", "188.114.96.0/20", "162.159.0.0/16",
+    "198.41.128.0/17", "23.235.32.0/20", "69.171.224.0/19",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
+]
+_preferred_ip_cache = None
+
+
+def _is_cloudflare_ip(addr: str) -> bool:
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in ipaddress.ip_network(c) for c in CF_CIDRS)
+
+
+def fetch_preferred_ips():
+    """拉取优选 IP 清单; 失败或全部被白名单过滤时回退到内置列表。
+    源文件按国家分组而非延迟排序, 所以优先挑不同国家的条目, 避免整批集中在同一地区。"""
+    global _preferred_ip_cache
+    if _preferred_ip_cache is not None:
+        return _preferred_ip_cache
+    entries = []
+    if CF_IP_LIMIT > 0 and CF_IP_SOURCE:
+        try:
+            resp = requests.get(CF_IP_SOURCE, timeout=(10, 30))
+            resp.raise_for_status()
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                addr, _, remark = line.partition("#")
+                addr = addr.strip()
+                if ":" not in addr:
+                    addr += ":443"
+                host, _, port = addr.partition(":")
+                if not port.isdigit():
+                    port = "443"
+                if not _is_cloudflare_ip(host):
+                    continue
+                country = remark.split("-")[0].strip() if remark else ""
+                entries.append((f"{host}:{port}", country))
+            print(f"[优选IP] 源内可用条目 {len(entries)} 条")
+        except Exception as e:
+            print(f"[优选IP] 拉取失败({e}), 使用内置兜底列表")
+            entries = []
+    ips = []
+    if entries:
+        used = set()
+        for addr, country in entries:
+            if country and country in used:
+                continue
+            ips.append(addr)
+            if country:
+                used.add(country)
+            if len(ips) >= CF_IP_LIMIT:
+                break
+        if len(ips) < CF_IP_LIMIT:
+            for addr, _ in entries:
+                if addr not in ips:
+                    ips.append(addr)
+                if len(ips) >= CF_IP_LIMIT:
+                    break
+    if not ips:
+        ips = [x for x in CF_IP_FALLBACK][:CF_IP_LIMIT]
+        print(f"[优选IP] 使用内置兜底: {', '.join(ips)}")
+    else:
+        print(f"[优选IP] 选中 {len(ips)} 条: {', '.join(ips)}")
+    _preferred_ip_cache = ips
+    return ips
+
+
+def build_entry_pool(env_name: str, fallback):
+    """入口池 = 环境变量指定的入口 + 自动拉取的优选 IP(去重, IP 追加在后)。"""
+    raw = os.environ.get(env_name, "").strip()
+    pool = [x.strip() for x in raw.split(",") if x.strip()] or list(fallback)
+    for ip in fetch_preferred_ips():
+        if ip not in pool:
+            pool.append(ip)
+    return pool
+
 
 def build_hosts_text(data):
     """生成可直接粘贴到 edgetunnel 后台「自定义优选IP」框的清单。
     每行 = 入口地址#名字$sstp://... ; 名字固定, 底下 SSTP 节点每 30 分钟自动换。"""
     countries = data["countries"]
-    # 入口: 默认用 7 个实测可用优选域名循环分配; 可用 HOSTS_ENTRY 覆盖(逗号分隔)
-    _entry = os.environ.get("HOSTS_ENTRY", "").strip()
-    edge = [e.strip() for e in _entry.split(",") if e.strip()] or EDGE_HOSTS or [f"{EDT_DOMAIN}:443"]
+    # 入口: 默认用实测可用优选域名循环分配; 可用 HOSTS_ENTRY 覆盖(逗号分隔), 并自动追加优选 IP
+    edge = build_entry_pool("HOSTS_ENTRY", EDGE_HOSTS or [f"{EDT_DOMAIN}:443"])
     lines = [
         "# edgetunnel「自定义优选IP」清单 (整段复制, 追加到后台现有内容后面)",
         f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
@@ -566,7 +667,7 @@ def build_sub_text(data):
     如需优选入口可设 SUB_ENTRY 环境变量 (逗号分隔 host:port)。"""
     countries = data["countries"]
     _sub_entry = os.environ.get("SUB_ENTRY", "").strip()
-    edge = [e.strip() for e in _sub_entry.split(",") if e.strip()] or [f"{EDT_DOMAIN}:443"]
+    edge = build_entry_pool("SUB_ENTRY", [f"{EDT_DOMAIN}:443"])
     lines = [
         "# edgetunnel 完整订阅 (vless://) —— 填进后台「订阅链接」URL",
         f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
