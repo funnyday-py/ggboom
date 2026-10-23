@@ -45,15 +45,17 @@ jobs:
           # Worker 自定义域 (edgetunnel 部署在 edt-gate)
           EDT_DOMAIN: "vpn.cnzxmdd.cc.cd"
           # 优选入口池构成 (脚本内部按本机实测排序):
-          #   1) 本机实测验证域名 (www.speedtest.net 9.57Mbps 断层第一 / postman / ox.ac.uk)
-          #   2) 外部优选域名源 (LancelotRar/best-cf-domains, 只作冗余)
-          #   3) 优选 IP 源 (LancelotRar/best-cf-ips 优先, ludas114343 兜底)
+          #   1) SUB_ENTRY 预设 (主力域名 + 自有域兜底)
+          #   2) 本机实测域名 VERIFIED_DOMAINS (CloudflareSpeedTest + 端到端验证)
+          #   3) 本机实测优选 IP VERIFIED_IPS (SJC/LAX 段, 端到端 7.5~10.8 Mbps) <- 池子主力
+          #   4) 外部源兜底 (域名 1 个 + IP 2 个; 实测外部 IP 5/6 超时, 只垫底)
           #      IP 源全部走 CF 官方网段白名单校验, 拉取失败回退内置列表
-          #   实测: 域名型入口跨轮极差 <1.5Mbps, IP 型入口极差可达 6.18Mbps, 故域名优先
-          SUB_ENTRY: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443,vpn.cnzxmdd.cc.cd:443"
+          # 实测: 域名型入口跨轮极差 <2.6Mbps, IP 型入口极差可达 6.18Mbps, 故域名优先
+          # 注意: CFST 的下载速度排名对本场景无预测力(r=0.424), 只有端到端实测过的才能进池
+          SUB_ENTRY: "www.speedtest.net:443,vpn.cnzxmdd.cc.cd:443"
           EDGE_HOSTS: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443"
-          CF_IP_LIMIT: "6"
-          CF_DOMAIN_LIMIT: "2"
+          CF_IP_LIMIT: "2"
+          CF_DOMAIN_LIMIT: "1"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
