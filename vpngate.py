@@ -469,15 +469,40 @@ EDGE_HOSTS = [
 HOSTS_URL = os.environ.get("HOSTS_URL", "https://funnyday-py.github.io/ggboom/hosts.txt")
 
 # ---------------------------------------------------------------------------
-# 自动优选 IP 源
-#   纯 Cloudflare Anycast 地址, 对方每 4 小时更新一次; 拉取失败回退到内置列表。
-#   每次跑 workflow 拉一次, 所以 IP 失效会自动被下一批替换, 不用手工维护。
+# 自动优选入口源
+#   实测结论 (2026-10-23, 本机 -> CF 边缘真实出站对照):
+#     LancelotRar/best-cf-ips collected  6/6 可用, 中位 8.43 Mbps  <- 首选
+#     LancelotRar/best-cf-domains lite   5/6 可用, 中位 4.21 Mbps  <- 次选(三网分线)
+#     ludas114343/cf-speedtest-sub        4/6 可用, 中位 1.60 Mbps  <- 兜底
+#   多源按顺序尝试, 每个源先按"国家分散"挑选, 某个源全挂时自动降级到下一个。
+#   每次跑 workflow 拉一次, IP 失效会被下一批替换, 不用手工维护。
 # ---------------------------------------------------------------------------
+# 优选 IP 源 (逗号分隔, 按优先级; 格式 host:port#备注)
 CF_IP_SOURCE = os.environ.get(
     "CF_IP_SOURCE",
+    "https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-collected.txt,"
     "https://raw.githubusercontent.com/ludas114343/cf-speedtest-sub/main/addressesapi.txt",
 )
-CF_IP_LIMIT = max(0, int(os.environ.get("CF_IP_LIMIT", "4") or 4))
+# 优选域名源 (逗号分隔, 按优先级; 格式 host:port#备注)
+#   注意: 源里的"优选域名"是发布者在自己网络下测的, 本机实测普遍只有 0.2~0.5 Mbps,
+#   只有 www.speedtest.net 例外(9.57 Mbps / 极差 0.70, 断层第一)。
+#   所以外部域名源只作补充, 主力是下面 VERIFIED_DOMAINS。
+CF_DOMAIN_SOURCE = os.environ.get(
+    "CF_DOMAIN_SOURCE",
+    "https://raw.githubusercontent.com/LancelotRar/best-cf-domains/main/best-cf-domain-lite.txt",
+)
+# 本机实测验证过的入口域名 (2026-10-23, 串行独占带宽, 3 轮端到端真实出站)
+#   格式: (host:port, 中位 Mbps)  —— 按实测速度从高到低排
+#   关键结论: www.speedtest.net 以 9.16~9.57 Mbps 断层第一, 极差仅 0.70;
+#   其余所有候选(含外部源给的域名)都在 0.67 Mbps 以下。
+#   外部"优选"是发布者在自己网络下测的, 本机直接用效果有限, 只能当冗余备份。
+VERIFIED_DOMAINS = [
+    ("www.speedtest.net:443", 9.57),   # 主力入口
+    ("www.postman.com:443", 0.60),     # 冗余
+    ("www.ox.ac.uk:443", 0.31),        # 冗余
+]
+CF_IP_LIMIT = max(0, int(os.environ.get("CF_IP_LIMIT", "6") or 6))
+CF_DOMAIN_LIMIT = max(0, int(os.environ.get("CF_DOMAIN_LIMIT", "2") or 2))
 CF_IP_FALLBACK = [
     "104.17.170.218:443",
     "104.17.116.123:443",
@@ -493,6 +518,7 @@ CF_CIDRS = [
     "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
 ]
 _preferred_ip_cache = None
+_preferred_domain_cache = None
 
 
 def _is_cloudflare_ip(addr: str) -> bool:
@@ -505,53 +531,141 @@ def _is_cloudflare_ip(addr: str) -> bool:
     return any(ip in ipaddress.ip_network(c) for c in CF_CIDRS)
 
 
+def _parse_entry_lines(text, require_cf_ip=False):
+    """解析源文件的 host:port#备注 行。
+    返回 [(host:port, country, remark), ...]; 缺端口按 443 补, 非 CF 网段直接丢弃。"""
+    entries = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "://" in line:
+            continue
+        addr, _, remark = line.partition("#")
+        addr = addr.strip()
+        if not addr:
+            continue
+        host, sep, port = addr.partition(":")
+        host = host.strip()
+        port = port.strip()
+        if not sep or not port:
+            port = "443"
+        if not port.isdigit():
+            continue
+        if require_cf_ip and not _is_cloudflare_ip(host):
+            continue
+        # 国家标记: 源文件格式各异 (US 🇺🇸 / 🇳🇱 荷兰-01 / 【日本】), 统一取可识别的国家 token
+        country = ""
+        for token in remark.replace("【", " ").replace("】", " ").split():
+            t = token.strip("-—·,，")
+            if len(t) == 2 and t.isalpha() and t.isupper():
+                country = t
+                break
+        entries.append((f"{host}:{port}", country, remark))
+    return entries
+
+
+def _pick_diverse(entries, limit):
+    """先按国家分散挑选(每个国家一条), 不足再按原顺序补齐。
+    源文件常按国家分组, 不做分散会整批落在同一地区。"""
+    picked = []
+    used = set()
+    for addr, country, _ in entries:
+        if country and country in used:
+            continue
+        picked.append(addr)
+        if country:
+            used.add(country)
+        if len(picked) >= limit:
+            return picked
+    for addr, _, _ in entries:
+        if addr not in picked:
+            picked.append(addr)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+# 运营商分线关键词: 源文件里带这些标记的域名是针对国内三网分别优化过的
+_CARRIER_TAGS = ("三网", "电信", "移动", "联通", "ctcc", "cmcc", "cucc")
+# 具体运营商分线 (只对单一运营商优选, 换网络就可能失效)
+_CARRIER_SPECIFIC = ("电信", "移动", "联通", "ctcc", "cmcc", "cucc")
+
+
+def _pick_domains(entries, limit):
+    """域名源挑选优先级:
+      0 = 通用三网分线 (标注「三网」, 对所有运营商都优选)   <- 最稳
+      1 = 具体运营商分线 (只对单一运营商优选)
+      2 = 其他通用优选域名
+    实测三网分线域名波动比优选 IP 大, 所以只取少数几个, 主力仍靠优选 IP。"""
+    def tier(e):
+        addr, _, remark = e
+        generic = "三网" in remark or "all" in remark.lower()
+        specific = any(t in remark for t in _CARRIER_SPECIFIC) or \
+            any(t in addr for t in ("ctcc", "cmcc", "cucc"))
+        if generic:
+            return 0
+        if specific:
+            return 1
+        return 2
+
+    picked = []
+    for addr, _, _ in sorted(entries, key=tier):
+        if addr not in picked:
+            picked.append(addr)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _fetch_text(url, tries=3):
+    """拉取源文件; raw.githubusercontent 偶发 ProxyError/超时, 重试几次。
+    raw.github.com 抖动时自动切 jsDelivr 镜像 (CDN 加速, 内容同源)。"""
+    candidates = [url]
+    m = re.match(r"^https://raw\.githubusercontent\.com/([^/]+/[^/]+)/([^/]+)/(.+)$", url)
+    if m:
+        candidates.append(f"https://cdn.jsdelivr.net/gh/{m.group(1)}@{m.group(2)}/{m.group(3)}")
+    last = None
+    for i in range(tries):
+        for cand in candidates:
+            try:
+                resp = requests.get(cand, timeout=(10, 30))
+                resp.raise_for_status()
+                if resp.text.strip():
+                    return resp.text
+                last = "空响应"
+            except Exception as e:
+                last = f"{type(e).__name__}"
+        if i < tries - 1:
+            time.sleep(1.5 * (i + 1))
+    print(f"[源] {url.rsplit('/', 1)[-1]} 拉取失败({last})")
+    return ""
+
+
+def _fetch_from_sources(sources, limit, require_cf_ip, label, picker=None):
+    """依次尝试各源, 第一个成功返回足够条目的源即采用。"""
+    picker = picker or _pick_diverse
+    for url in [u.strip() for u in sources.split(",") if u.strip()]:
+        text = _fetch_text(url)
+        if not text:
+            continue
+        entries = _parse_entry_lines(text, require_cf_ip=require_cf_ip)
+        if not entries:
+            print(f"[{label}] 源无可用条目, 换下一个: {url}")
+            continue
+        picked = picker(entries, limit)
+        print(f"[{label}] 源 {url.rsplit('/', 2)[-2]}/{url.rsplit('/', 1)[-1]} "
+              f"可用 {len(entries)} 条 -> 选 {len(picked)} 条")
+        return picked
+    return []
+
+
 def fetch_preferred_ips():
-    """拉取优选 IP 清单; 失败或全部被白名单过滤时回退到内置列表。
-    源文件按国家分组而非延迟排序, 所以优先挑不同国家的条目, 避免整批集中在同一地区。"""
+    """拉取优选 IP 清单; 失败或全部被白名单过滤时回退到内置列表。"""
     global _preferred_ip_cache
     if _preferred_ip_cache is not None:
         return _preferred_ip_cache
-    entries = []
-    if CF_IP_LIMIT > 0 and CF_IP_SOURCE:
-        try:
-            resp = requests.get(CF_IP_SOURCE, timeout=(10, 30))
-            resp.raise_for_status()
-            for line in resp.text.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                addr, _, remark = line.partition("#")
-                addr = addr.strip()
-                if ":" not in addr:
-                    addr += ":443"
-                host, _, port = addr.partition(":")
-                if not port.isdigit():
-                    port = "443"
-                if not _is_cloudflare_ip(host):
-                    continue
-                country = remark.split("-")[0].strip() if remark else ""
-                entries.append((f"{host}:{port}", country))
-            print(f"[优选IP] 源内可用条目 {len(entries)} 条")
-        except Exception as e:
-            print(f"[优选IP] 拉取失败({e}), 使用内置兜底列表")
-            entries = []
     ips = []
-    if entries:
-        used = set()
-        for addr, country in entries:
-            if country and country in used:
-                continue
-            ips.append(addr)
-            if country:
-                used.add(country)
-            if len(ips) >= CF_IP_LIMIT:
-                break
-        if len(ips) < CF_IP_LIMIT:
-            for addr, _ in entries:
-                if addr not in ips:
-                    ips.append(addr)
-                if len(ips) >= CF_IP_LIMIT:
-                    break
+    if CF_IP_LIMIT > 0 and CF_IP_SOURCE:
+        ips = _fetch_from_sources(CF_IP_SOURCE, CF_IP_LIMIT, True, "优选IP")
     if not ips:
         ips = [x for x in CF_IP_FALLBACK][:CF_IP_LIMIT]
         print(f"[优选IP] 使用内置兜底: {', '.join(ips)}")
@@ -561,10 +675,36 @@ def fetch_preferred_ips():
     return ips
 
 
+def fetch_preferred_domains():
+    """拉取优选域名清单 (源里的域名是别人网络下测的, 本机普遍很慢, 只作补充)。
+    前面先放本机实测验证过的域名 (VERIFIED_DOMAINS), 按实测速度排序。"""
+    global _preferred_domain_cache
+    if _preferred_domain_cache is not None:
+        return _preferred_domain_cache
+    domains = []
+    if CF_DOMAIN_LIMIT > 0 and CF_DOMAIN_SOURCE:
+        domains = _fetch_from_sources(CF_DOMAIN_SOURCE, CF_DOMAIN_LIMIT, False,
+                                      "优选域名", picker=_pick_domains)
+    verified = [d for d, _ in VERIFIED_DOMAINS]
+    merged = verified + [d for d in domains if d not in verified]
+    _preferred_domain_cache = merged
+    print(f"[优选域名] 池 = 本机实测 {len(verified)} 个 + 外部源 {len(domains)} 个")
+    return merged
+
+
 def build_entry_pool(env_name: str, fallback):
-    """入口池 = 环境变量指定的入口 + 自动拉取的优选 IP(去重, IP 追加在后)。"""
+    """入口池 = 环境变量指定的入口 + 本机实测域名 + 外部优选域名 + 优选 IP(去重)。
+
+    实测结论(2026-10-23, 3 轮):
+      - 域名型入口跨轮速度极差远小于 IP 型入口 (speedtest 0.70 vs IP 最高 6.18 Mbps)
+      - 外部源给的域名普遍只有 0.2~0.5 Mbps, 不能当主力
+    所以排序上把实测域名放前面, 外部源与 IP 靠后轮询。
+    """
     raw = os.environ.get(env_name, "").strip()
     pool = [x.strip() for x in raw.split(",") if x.strip()] or list(fallback)
+    for d in fetch_preferred_domains():
+        if d not in pool:
+            pool.append(d)
     for ip in fetch_preferred_ips():
         if ip not in pool:
             pool.append(ip)
@@ -582,7 +722,7 @@ def build_hosts_text(data):
         f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
         f"# 固定地址: {HOSTS_URL}",
         "# 每行 = 入口地址#名字$sstp://vpn:vpn@节点:端口",
-        "# 入口用 7 个实测可用优选域名循环分配",
+        "# 入口池 = 预设入口 + 本机实测域名 + 外部优选域名 + 优选 IP(国别分散)",
         "# 名字 = 国家-住宅/机房-编号, 直接区分住宅与机房",
         "# 名字固定; 只有 $sstp:// 后面的节点地址每 30 分钟自动更换",
         "# 账号密码固定 vpn:vpn ; 节点端口必须保留",
