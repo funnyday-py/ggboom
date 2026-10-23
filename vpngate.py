@@ -493,21 +493,38 @@ CF_DOMAIN_SOURCE = os.environ.get(
 )
 # 本机实测验证过的入口域名 (2026-10-23, 串行独占带宽, 3 轮端到端真实出站)
 #   格式: (host:port, 中位 Mbps)  —— 按实测速度从高到低排
-#   关键结论: www.speedtest.net 以 9.16~9.57 Mbps 断层第一, 极差仅 0.70;
+#   关键结论: www.speedtest.net 以 10.12 Mbps 断层第一, 极差 2.54;
 #   其余所有候选(含外部源给的域名)都在 0.67 Mbps 以下。
 #   外部"优选"是发布者在自己网络下测的, 本机直接用效果有限, 只能当冗余备份。
 VERIFIED_DOMAINS = [
-    ("www.speedtest.net:443", 9.57),   # 主力入口
-    ("www.postman.com:443", 0.60),     # 冗余
+    ("www.speedtest.net:443", 10.12),  # 主力入口
+    ("www.postman.com:443", 4.48),     # 冗余
     ("www.ox.ac.uk:443", 0.31),        # 冗余
+]
+# 本机实测验证过的优选 IP (2026-10-23, CloudflareSpeedTest v2.3.5 本机跑 + 端到端二次验证)
+#   产线: 8 个源合并 798 个候选 -> CFST 测延迟/丢包 -> 取下载速度前 18 -> 端到端实测 ->
+#         3 轮稳定性复测 -> 只留"全轮成功且中位 >= 2 Mbps"者。
+#   格式: (host:port, 中位 Mbps)  —— 按实测速度从高到低排
+#   重要: CFST 的下载速度排名对本场景没有预测力 (与端到端速度相关系数仅 r=0.424)。
+#         CFST 榜首 172.67.72.176 (25.64 MB/s) 端到端只有 0.41 Mbps; 而 CFST 只排第 18 的
+#         104.18.62.183 (0.02 MB/s) 端到端 8.28 Mbps。原因是 CFST 打的是 CF 自家测速站,
+#         而真实路径是 本机 -> CF 边缘 -> Worker -> 第三方站, SEA colo 在这条路径上会崩。
+#         所以 CFST 的价值是"扩大候选池", 不是"提供排名"。
+VERIFIED_IPS = [
+    ("104.18.58.130:443", 9.76),       # LAX, 极差 1.63
+    ("104.18.54.222:443", 9.66),       # LAX, 极差 0.47 —— 最稳
+    ("162.159.237.185:443", 9.38),     # SJC, 极差 3.39
+    ("104.18.62.183:443", 8.75),       # LAX, 极差 1.48
+    ("162.159.237.219:443", 8.02),     # SJC, 极差 0.71
+    ("172.64.79.226:443", 7.88),       # SJC, 极差 2.63
 ]
 CF_IP_LIMIT = max(0, int(os.environ.get("CF_IP_LIMIT", "6") or 6))
 CF_DOMAIN_LIMIT = max(0, int(os.environ.get("CF_DOMAIN_LIMIT", "2") or 2))
 CF_IP_FALLBACK = [
+    "104.18.58.130:443",
+    "104.18.54.222:443",
+    "162.159.237.185:443",
     "104.17.170.218:443",
-    "104.17.116.123:443",
-    "104.24.0.1:443",
-    "104.17.104.166:443",
 ]
 # Cloudflare 官方网段白名单: 源被污染时不至于把第三方 VPS 混进入口池
 CF_CIDRS = [
@@ -675,6 +692,11 @@ def fetch_preferred_ips():
     return ips
 
 
+def fetch_verified_ips():
+    """本机实测验证过的优选 IP (CloudflareSpeedTest 本机跑 + 端到端二次验证的结果)。"""
+    return [ip for ip, _ in VERIFIED_IPS]
+
+
 def fetch_preferred_domains():
     """拉取优选域名清单 (源里的域名是别人网络下测的, 本机普遍很慢, 只作补充)。
     前面先放本机实测验证过的域名 (VERIFIED_DOMAINS), 按实测速度排序。"""
@@ -693,18 +715,25 @@ def fetch_preferred_domains():
 
 
 def build_entry_pool(env_name: str, fallback):
-    """入口池 = 环境变量指定的入口 + 本机实测域名 + 外部优选域名 + 优选 IP(去重)。
+    """入口池 = 环境变量指定的入口 + 本机实测域名 + 本机实测优选 IP + 外部源(兜底)。
 
-    实测结论(2026-10-23, 3 轮):
-      - 域名型入口跨轮速度极差远小于 IP 型入口 (speedtest 0.70 vs IP 最高 6.18 Mbps)
-      - 外部源给的域名普遍只有 0.2~0.5 Mbps, 不能当主力
-    所以排序上把实测域名放前面, 外部源与 IP 靠后轮询。
+    实测结论(2026-10-23, 串行 3 轮端到端真实出站):
+      - 域名型入口跨轮速度极差远小于 IP 型入口 (speedtest 2.54 vs 现用 IP 最高 1.85)
+      - 本机实测的 6 个优选 IP (SJC/LAX 段) 稳定在 7.5~10.8 Mbps, 是池子主力
+      - 外部源自动拉取的 IP 实测 5/6 直接超时, 只剩 0.34 Mbps —— 已降级为纯兜底
+      - 外部源给的域名普遍只有 0.2~1.4 Mbps, 同样只能当冗余
+      - CFST 的下载速度排名对本场景无预测力 (r=0.424), 只有端到端实测过的才能进池
+    所以排序上把本机实测过的放前面, 外部源垫底。
     """
     raw = os.environ.get(env_name, "").strip()
     pool = [x.strip() for x in raw.split(",") if x.strip()] or list(fallback)
+    # fetch_preferred_domains 已返回「本机实测域名 + 外部源域名」的合并列表
     for d in fetch_preferred_domains():
         if d not in pool:
             pool.append(d)
+    for ip in fetch_verified_ips():
+        if ip not in pool:
+            pool.append(ip)
     for ip in fetch_preferred_ips():
         if ip not in pool:
             pool.append(ip)
