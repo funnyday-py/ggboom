@@ -44,12 +44,16 @@ jobs:
           SUB_URL: "https://funnyday-py.github.io/ggboom/sub.txt"
           # Worker 自定义域 (edgetunnel 部署在 edt-gate)
           EDT_DOMAIN: "vpn.cnzxmdd.cc.cd"
-          # 优选入口池: 域名入口在此配置; CF Anycast 纯 IP 由脚本每次自动拉取并追加
-          #   IP 源: ludas114343/cf-speedtest-sub (每 4h 更新, 只含 CF 官方网段, 白名单校验)
-          #   拉取失败自动回退到 vpngate.py 内置的 4 个 IP
-          SUB_ENTRY: "www.postman.com:443,www.speedtest.net:443,www.ox.ac.uk:443,vpn.cnzxmdd.cc.cd:443"
-          EDGE_HOSTS: "www.postman.com:443,www.speedtest.net:443,www.ox.ac.uk:443"
-          CF_IP_LIMIT: "4"
+          # 优选入口池构成 (脚本内部按本机实测排序):
+          #   1) 本机实测验证域名 (www.speedtest.net 9.57Mbps 断层第一 / postman / ox.ac.uk)
+          #   2) 外部优选域名源 (LancelotRar/best-cf-domains, 只作冗余)
+          #   3) 优选 IP 源 (LancelotRar/best-cf-ips 优先, ludas114343 兜底)
+          #      IP 源全部走 CF 官方网段白名单校验, 拉取失败回退内置列表
+          #   实测: 域名型入口跨轮极差 <1.5Mbps, IP 型入口极差可达 6.18Mbps, 故域名优先
+          SUB_ENTRY: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443,vpn.cnzxmdd.cc.cd:443"
+          EDGE_HOSTS: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443"
+          CF_IP_LIMIT: "6"
+          CF_DOMAIN_LIMIT: "2"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
