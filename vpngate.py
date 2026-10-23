@@ -886,6 +886,21 @@ def build_sub_text(data):
     for i, e in enumerate(edge, 1):
         lines.append(_build_direct_link(f"CF直出-{i:02d}", e))
 
+    # CF 直出扩展组: 用实测优选 IP 为每个节点生成直出链接。
+    # 起因 (2026-10-23): VPN Gate 的 opengw.net 中继批量失效 (DNS 还解析得到 AWS IP 54.76.135.1,
+    # 但 TCP 全超时), 链式组 0/20 可用; 此时直出是唯一能用的组, 需要足够的节点量顶替。
+    # 用实测最优的 VERIFIED_IPS 循环分配, 保证每条链路都有 7~10 Mbps 的入口。
+    verified_ips = fetch_verified_ips()
+    if verified_ips:
+        lines.append("")
+        lines.append("# ---- CF 直出扩展 (用本机实测优选 IP, 链式中继失效时的主力) ----")
+        all_direct_nodes = [n for grp in countries.values() for n in grp["nodes"]]
+        for i, n in enumerate(all_direct_nodes, 1):
+            e = verified_ips[(i - 1) % len(verified_ips)]
+            code = str(n.get("country_code") or "").upper()
+            zh = COUNTRY_ZH.get(code) or code or "节点"
+            lines.append(_build_direct_link(f"直出扩展-{zh}-{i:02d}", e))
+
     # 极速组: 按链路握手延迟升序取前 8 个, 不分国家/住宅机房 (追求速度优先用这组)
     all_nodes = [n for grp in countries.values() for n in grp["nodes"]]
     fastest = sorted(
