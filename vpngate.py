@@ -407,7 +407,7 @@ def build_outputs(results, raw_count, sstp_count, source):
     return data
 
 
-CHAIN_URL = os.environ.get("CHAIN_URL", "https://jerylihub.github.io/gate/chains.txt")
+CHAIN_URL = os.environ.get("CHAIN_URL", "https://funnyday-py.github.io/ggboom/chains.txt")
 
 
 def build_chains_text(data):
@@ -466,7 +466,7 @@ EDGE_HOSTS = [
     if h.strip()
 ]
 
-HOSTS_URL = os.environ.get("HOSTS_URL", "https://jerylihub.github.io/gate/hosts.txt")
+HOSTS_URL = os.environ.get("HOSTS_URL", "https://funnyday-py.github.io/ggboom/hosts.txt")
 
 
 def build_hosts_text(data):
@@ -525,7 +525,7 @@ def build_hosts_text(data):
 EDT_UUID = os.environ.get("EDT_UUID", "f2afba09-d83b-43d1-b2df-f149941c4623")
 EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "vpn.cnzxmdd.cc.cd")
 EDT_FINGERPRINT = os.environ.get("EDT_FINGERPRINT", "chrome")
-SUB_URL = os.environ.get("SUB_URL", "https://jerylihub.github.io/gate/sub.txt")
+SUB_URL = os.environ.get("SUB_URL", "https://funnyday-py.github.io/ggboom/sub.txt")
 
 
 def _b64_secret_encode(plaintext, secret):
@@ -573,7 +573,8 @@ def build_sub_text(data):
         f"# 固定地址: {SUB_URL}",
         f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
         f"# 连接地址: {', '.join(edge)}",
-        "# 名字固定; $sstp:// 链式代理(编码在 path)每 30 分钟自动更换",
+        "# 前置 CF直出 组: 不经中继, 延迟最低; 出口为 CF 共享 IP (部分站点风控)",
+        "# 其后为链式组: $sstp:// 中继编码在 path, 每 30 分钟自动更换",
         "# 账号密码固定 vpn:vpn ; 节点端口已编码进 path",
         "# ========================================================",
     ]
@@ -598,6 +599,22 @@ def build_sub_text(data):
             f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
             f"&path={quote('/video/' + enc, safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
         )
+
+    def _build_direct_link(name, entry):
+        """不经 VPN Gate 中继: Worker 用原生 connect() 直连目标, 出口是 Cloudflare 的 IP。
+        path 里 proxyip= 留空 -> 关掉默认公共反代池 (该池实测对 443 目标握手即失败)。"""
+        e_host, e_port = _parse_entry(entry)
+        return (
+            f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
+            f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
+            f"&path={quote('/?ed=2048&proxyip=', safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
+        )
+
+    # CF 直出组: 不走中继, 握手最快; 出口是 Cloudflare 共享 IP (部分站点会风控)
+    lines.append("")
+    lines.append("# ---- CF 直出 (不经 SSTP 中继; 延迟最低, 但出口是 Cloudflare 共享 IP, 部分站点会风控) ----")
+    for i, e in enumerate(edge, 1):
+        lines.append(_build_direct_link(f"CF直出-{i:02d}", e))
 
     # 极速组: 按链路握手延迟升序取前 8 个, 不分国家/住宅机房 (追求速度优先用这组)
     all_nodes = [n for grp in countries.values() for n in grp["nodes"]]
