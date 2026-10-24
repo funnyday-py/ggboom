@@ -520,6 +520,28 @@ VERIFIED_IPS = [
 ]
 CF_IP_LIMIT = max(0, int(os.environ.get("CF_IP_LIMIT", "6") or 6))
 CF_DOMAIN_LIMIT = max(0, int(os.environ.get("CF_DOMAIN_LIMIT", "2") or 2))
+
+# 实测可用的 ProxyIP 中转 (2026-10-24, 经节点访问 www.cloudflare.com/cdn-cgi/trace 8/8 全 200)。
+# 背景: Worker 的 connect() 被平台禁止回连 CF 自家 IP (防回环), 访问 CF 前置站
+# (dash.cloudflare.com 等) 必须经非 CF 中转; 默认公共反代池已坏, CF 站全挂。
+# 源: KafeMars/best-ips-domains BestProxyIPs; 按实测耗时排序, 前 5 个入池轮换。
+# 注意: ProxyIP 只影响「目标也是 CF 站」的连接, 非 CF 站 (google 等) 不经中转、不受影响。
+PROXYIP_POOL = [
+    "38.65.9.111",       # LAX, 1.8s
+    "38.58.108.84",      # LAX, 2.0s
+    "64.49.28.173",      # LAX, 1.9s
+    "23.246.155.195",    # SJC, 2.1s
+    "160.16.103.102",    # NRT, 2.8s
+]
+_PROXYIP_CURSOR = [0]
+
+
+def _next_proxyip():
+    """轮换分配 ProxyIP, 单点失效只影响部分节点。"""
+    i = _PROXYIP_CURSOR[0]
+    _PROXYIP_CURSOR[0] = i + 1
+    return PROXYIP_POOL[i % len(PROXYIP_POOL)]
+
 CF_IP_FALLBACK = [
     "104.18.58.130:443",
     "104.18.54.222:443",
@@ -872,12 +894,17 @@ def build_sub_text(data):
 
     def _build_direct_link(name, entry):
         """不经 VPN Gate 中继: Worker 用原生 connect() 直连目标, 出口是 Cloudflare 的 IP。
-        path 里 proxyip= 留空 -> 关掉默认公共反代池 (该池实测对 443 目标握手即失败)。"""
+        path 里 proxyip= 填实测可用中转 (PROXYIP_POOL 轮换):
+        Worker 的 connect() 被平台禁止回连 CF 自家 IP (防回环), 直接访问
+        *.cloudflare.com 等 CF 前置站必然「隧道断开」(ERR_CONNECTION_CLOSED, 2026-10-24 实测);
+        填了 ProxyIP 后 CF 站经非 CF 中转可达, 非 CF 站 (google 等) 不受影响。
+        留空则走默认公共反代池 —— 该池实测已坏, 等于 CF 站全挂。"""
         e_host, e_port = _parse_entry(entry)
+        pip = _next_proxyip()
         return (
             f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
             f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
-            f"&path={quote('/?ed=2048&proxyip=', safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
+            f"&path={quote('/?ed=2048&proxyip=' + pip, safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
         )
 
     # CF 直出组: 不走中继, 握手最快; 出口是 Cloudflare 共享 IP (部分站点会风控)
