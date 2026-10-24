@@ -88,5 +88,26 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
+      # 同步 ADD.txt 到 Cloudflare KV (edgetunnel「自适应订阅」的数据源)。
+      # 此前靠手动在 /admin 后台粘贴, 现改为每次 workflow 跑完自动推送。
+      # 需要的 Secrets:
+      #   CF_API_TOKEN       - 权限: Account > Workers KV Storage > Edit
+      #   CF_KV_NAMESPACE_ID - KV 命名空间 VPN20261021 的 id (dashboard > Workers & Pages > KV)
+      - name: Sync ADD.txt to Cloudflare KV
+        run: |
+          code=$(curl -s -o /tmp/kv_resp.json -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: text/plain;charset=UTF-8" \
+            --data-binary @ADD.txt \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_NAMESPACE_ID/values/ADD.txt")
+          echo "KV PUT status: $code"
+          cat /tmp/kv_resp.json; echo
+          [ "$code" = "200" ] || exit 1
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          # account id 非敏感, 明文即可
+          CF_ACCOUNT_ID: "8cc8a4b67c1bfc6a9ddb6e3b1e61300b"
+
       - name: Show site URL
         run: 'echo "site: https://funnyday-py.github.io/ggboom/ (deploy outcome: ${{ steps.deployment.outcome }})"'
