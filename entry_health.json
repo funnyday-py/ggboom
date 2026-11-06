@@ -1,0 +1,106 @@
+{
+ "generated_at": "2026-11-06T23:04:32+08:00",
+ "ttl_hours": 24,
+ "judge": "本机连通性判定 (VLESS-WS 隧道内 TLS 握手); 不做速度排名",
+ "tries": 3,
+ "need": 2,
+ "entries": {
+  "www.speedtest.net:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "vpn.cnzxmdd.cc.cd:443": {
+   "ok": false,
+   "pass": 0,
+   "tries": 3,
+   "errors": [
+    "TimeoutError: The read operation timed out",
+    "TimeoutError: The read operation timed out"
+   ]
+  },
+  "www.postman.com:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "www.ox.ac.uk:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "cloudflare.seeck.cn:443": {
+   "ok": false,
+   "pass": 1,
+   "tries": 3,
+   "errors": [
+    "TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "TimeoutError: _ssl.c:1015: The handshake operation timed out"
+   ]
+  },
+  "104.18.58.130:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "104.18.54.222:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "162.159.237.185:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "104.18.62.183:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "162.159.237.219:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "172.64.79.226:443": {
+   "ok": true,
+   "pass": 3,
+   "tries": 3,
+   "errors": []
+  },
+  "188.114.96.5:443": {
+   "ok": false,
+   "pass": 1,
+   "tries": 3,
+   "errors": [
+    "TimeoutError: The read operation timed out",
+    "TimeoutError: The read operation timed out"
+   ]
+  },
+  "188.114.96.2:443": {
+   "ok": false,
+   "pass": 0,
+   "tries": 3,
+   "errors": [
+    "TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "TimeoutError: The read operation timed out"
+   ]
+  }
+ },
+ "proxyips": {
+  "38.65.9.111": false,
+  "38.58.108.84": true,
+  "64.49.28.173": true,
+  "23.246.155.195": false,
+  "160.16.103.102": true
+ }
+}
