@@ -535,12 +535,75 @@ PROXYIP_POOL = [
 ]
 _PROXYIP_CURSOR = [0]
 
+# ---------------------------------------------------------------------------
+# 下发前剔除死入口 (借鉴 CF-APEX 的 dropDeadNodes)
+# ---------------------------------------------------------------------------
+# entry_health.json 由 probe_entries.py 在**本机**跑出来再提交到仓库。
+# 不放在 CI 里直接探测: GitHub runner 在美国机房, 到 CF 边缘几乎必然连通,
+# 测出来必然全绿; 真正决定入口可用性的是「本机 -> CF 边缘」这段。
+# 同理, 这里只剔除「明确判死」的, 不做速度排序 —— 速度是本机+时段专属,
+# 把它写进仓库给 CI 读, 只会把偶然值固化成错误结论 (CFST r=0.424 的教训)。
+HEALTH_FILE = os.path.join(REPO_DIR, "entry_health.json")
+_health_cache = False  # False = 尚未加载; dict = 有效结论; {} = 无有效结论
+
+
+def load_entry_health():
+    """读本机实测结论; 结论过期/文件缺失/解析失败一律返回 {}, 即不过滤 (冷启动保护)。"""
+    global _health_cache
+    if _health_cache is not False:
+        return _health_cache
+    _health_cache = {}
+    try:
+        with open(HEALTH_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        gen = datetime.fromisoformat(d["generated_at"])
+        ttl = float(d.get("ttl_hours", 24))
+        age_h = (datetime.now(timezone.utc) - gen.astimezone(timezone.utc)).total_seconds() / 3600
+        if age_h > ttl:
+            print(f"[入口健康] 结论已过期 ({age_h:.1f}h > {ttl:.0f}h), 本次不过滤")
+            return _health_cache
+        _health_cache = d
+        print(f"[入口健康] 载入 {age_h:.1f}h 前的本机实测: "
+              f"{len(d.get('entries', {}))} 个入口 / {len(d.get('proxyips', {}))} 个中转")
+    except FileNotFoundError:
+        print("[入口健康] 无 entry_health.json, 本次不过滤 (本机跑 probe_entries.py 可生成)")
+    except Exception as e:
+        print(f"[入口健康] 读取失败 ({type(e).__name__}), 本次不过滤")
+    return _health_cache
+
+
+def filter_dead_entries(pool):
+    """只剔除明确实测判死的入口; 未测过的按可用处理。剔空则整体回退。"""
+    health = load_entry_health()
+    judged = health.get("entries", {})
+    if not judged:
+        return pool
+    alive = [e for e in pool if judged.get(e, {}).get("ok", True)]
+    dropped = [e for e in pool if e not in alive]
+    if not alive:
+        print("[入口健康] 剔除后入口池为空, 整体回退 (避免生成空订阅)")
+        return pool
+    if dropped:
+        print(f"[入口健康] 剔除 {len(dropped)} 个死入口: {', '.join(dropped)}")
+    return alive
+
+
+def alive_proxyips():
+    """中转池同样按本机实测剔除; 未测过 / 全死 时回退完整池。"""
+    health = load_entry_health()
+    judged = health.get("proxyips", {})
+    if not judged:
+        return PROXYIP_POOL
+    alive = [ip for ip in PROXYIP_POOL if judged.get(ip, True)]
+    return alive or PROXYIP_POOL
+
 
 def _next_proxyip():
-    """轮换分配 ProxyIP, 单点失效只影响部分节点。"""
+    """轮换分配实测可用的 ProxyIP, 单点失效只影响部分节点。"""
+    pool = alive_proxyips()
     i = _PROXYIP_CURSOR[0]
     _PROXYIP_CURSOR[0] = i + 1
-    return PROXYIP_POOL[i % len(PROXYIP_POOL)]
+    return pool[i % len(pool)]
 
 CF_IP_FALLBACK = [
     "104.18.58.130:443",
@@ -759,7 +822,8 @@ def build_entry_pool(env_name: str, fallback):
     for ip in fetch_preferred_ips():
         if ip not in pool:
             pool.append(ip)
-    return pool
+    # 最后按本机实测结论剔除死入口 (无结论/结论过期时原样返回)
+    return filter_dead_entries(pool)
 
 
 def build_hosts_text(data):
@@ -865,8 +929,8 @@ def build_sub_text(data):
         f"# 固定地址: {SUB_URL}",
         f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
         f"# 连接地址: {', '.join(edge)}",
-        "# 前置 CF直出 组: 不经中继, 延迟最低; 出口为 CF 共享 IP (部分站点风控)",
-        "# 其后为链式组: $sstp:// 中继编码在 path, 每 30 分钟自动更换",
+        "# 直出分两组: 「非CF站」纯直出少一跳; 「CF站」经 ProxyIP 中转绕平台回环保护",
+        "# 两组出口都是 CF 共享 IP (部分站点会风控); 链式组随后, $sstp:// 中继编码在 path",
         "# 账号密码固定 vpn:vpn ; 节点端口已编码进 path",
         "# ========================================================",
     ]
@@ -892,41 +956,48 @@ def build_sub_text(data):
             f"&path={quote('/video/' + enc, safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
         )
 
-    def _build_direct_link(name, entry):
+    def _build_direct_link(name, entry, proxyip=None):
         """不经 VPN Gate 中继: Worker 用原生 connect() 直连目标, 出口是 Cloudflare 的 IP。
-        path 里 proxyip= 填实测可用中转 (PROXYIP_POOL 轮换):
-        Worker 的 connect() 被平台禁止回连 CF 自家 IP (防回环), 直接访问
-        *.cloudflare.com 等 CF 前置站必然「隧道断开」(ERR_CONNECTION_CLOSED, 2026-10-24 实测);
-        填了 ProxyIP 后 CF 站经非 CF 中转可达, 非 CF 站 (google 等) 不受影响。
-        留空则走默认公共反代池 —— 该池实测已坏, 等于 CF 站全挂。"""
+
+        proxyip=None -> path 里 `proxyip=` 留空, 纯直出, 少一跳, 非 CF 站用这组。
+        proxyip=<ip> -> 全部出站流量经该非 CF 中转, 用于绕开平台回环保护。
+
+        背景 (2026-10-24 实测): Worker 的 connect() 被 CF 平台禁止回连自家 IP,
+        直接访问 dash.cloudflare.com 等 CF 前置站必然「隧道断开」(ERR_CONNECTION_CLOSED)。
+        但 proxyip 一填就是**全流量**中转, 不是只影响 CF 站 —— 所以非 CF 站不该带这个参数,
+        否则白绕一跳。CF-APEX 的解法是在 Worker 内部按目标 IP 是否属于 CF 段做直连/中继竞速;
+        我们不改 Worker 源码, 改为在生成侧下发两组路径, 由客户端按目标选。
+
+        注意: proxyip 留空不等于走默认公共反代池, `/?ed=2048` 已关闭反代池。"""
         e_host, e_port = _parse_entry(entry)
-        pip = _next_proxyip()
         return (
             f"vless://{EDT_UUID}@{e_host}:{e_port}?security=tls&type=ws"
             f"&host={EDT_DOMAIN}&fp={EDT_FINGERPRINT}&sni={EDT_DOMAIN}"
-            f"&path={quote('/?ed=2048&proxyip=' + pip, safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
+            f"&path={quote('/?ed=2048&proxyip=' + (proxyip or ''), safe='')}&encryption=none&alpn=#{quote(name, safe='')}"
         )
 
-    # CF 直出组: 不走中继, 握手最快; 出口是 Cloudflare 共享 IP (部分站点会风控)
+    # 直出两组按目标分流 (借鉴 CF-APEX 的 dialOut 竞速, 但决策权交给客户端):
+    #   - 非CF站组: 纯直出, 不绕中转, 少一跳, 速度最快; 但打不开 CF 前置站 (平台防回环)
+    #   - CF站组:   经 PROXYIP_POOL 中转, 专门给 dash.cloudflare.com 这类 CF 自家站
     lines.append("")
-    lines.append("# ---- CF 直出 (不经 SSTP 中继; 延迟最低, 但出口是 Cloudflare 共享 IP, 部分站点会风控) ----")
+    lines.append("# ---- 直出-非CF站 (纯直出, 少一跳; google/youtube 等用这组) ----")
     for i, e in enumerate(edge, 1):
-        lines.append(_build_direct_link(f"CF直出-{i:02d}", e))
+        lines.append(_build_direct_link(f"直出-非CF站-{i:02d}", e))
 
-    # CF 直出扩展组: 用实测优选 IP 为每个节点生成直出链接。
+    # 直出-CF站组: 用实测优选 IP 为每个节点生成带 ProxyIP 中转的直出链接。
     # 起因 (2026-10-23): VPN Gate 的 opengw.net 中继批量失效 (DNS 还解析得到 AWS IP 54.76.135.1,
     # 但 TCP 全超时), 链式组 0/20 可用; 此时直出是唯一能用的组, 需要足够的节点量顶替。
-    # 用实测最优的 VERIFIED_IPS 循环分配, 保证每条链路都有 7~10 Mbps 的入口。
+    # 用实测最优的 VERIFIED_IPS 循环分配, 保证每条链路都有较好的入口。
     verified_ips = fetch_verified_ips()
     if verified_ips:
         lines.append("")
-        lines.append("# ---- CF 直出扩展 (用本机实测优选 IP, 链式中继失效时的主力) ----")
+        lines.append("# ---- 直出-CF站 (经 ProxyIP 中转; dash.cloudflare.com 等 CF 自家站用这组) ----")
         all_direct_nodes = [n for grp in countries.values() for n in grp["nodes"]]
         for i, n in enumerate(all_direct_nodes, 1):
             e = verified_ips[(i - 1) % len(verified_ips)]
             code = str(n.get("country_code") or "").upper()
             zh = COUNTRY_ZH.get(code) or code or "节点"
-            lines.append(_build_direct_link(f"直出扩展-{zh}-{i:02d}", e))
+            lines.append(_build_direct_link(f"直出-CF站-{zh}-{i:02d}", e, proxyip=_next_proxyip()))
 
     # 极速组: 按链路握手延迟升序取前 8 个, 不分国家/住宅机房 (追求速度优先用这组)
     all_nodes = [n for grp in countries.values() for n in grp["nodes"]]
