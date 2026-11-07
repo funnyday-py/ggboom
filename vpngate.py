@@ -605,6 +605,50 @@ def _next_proxyip():
     _PROXYIP_CURSOR[0] = i + 1
     return pool[i % len(pool)]
 
+
+# ---------------------------------------------------------------------------
+# 第三方反代入口 (试验性, 默认关闭) —— 零成本扩容, 不是主力
+# ---------------------------------------------------------------------------
+# 来源: CF-APEX 内置的 234 条第三方 VPS 反代 IP, 均不在 CF 官方网段内。
+# 2026-11-07 本机同时段复测 (retest_thirdparty.py, 串行 2MB 下载 ×2 轮):
+#   第三方池  13/25 连通, 可用者中位 5.98 Mbps, 最快 9.72 Mbps
+#   官方段     3/3  连通, 中位 8.98 Mbps, 最快 9.12 Mbps
+# 结论: 第三方 **并不比官方段快**。2026-11-06 记下的「快 4 倍」是拿某个抖动时段
+#       的官方段单值 (0.95 Mbps) 做的比较, 口径错了。它的价值是「多一批不同路径
+#       的冗余」, 不是提速; 且这类 VPS 没有 SLA, 衰减很快 (同批 14 个公益中继
+#       域名已有 5/6 DNS 失效)。
+# 风险 (知情后自行决定): 客户端 TLS 握手先落到别人的 VPS, 再由它转给 CF。
+#   明文内容仍在 TLS 内它看不到, 但 SNI / 连接时间 / 流量大小等元数据它看得到;
+#   是否记录、何时下线都不受我们控制。所以按四条约束收编:
+#     1) 显式清单, 不从外部源自动拉 —— CF_CIDRS 白名单保持原样不动。
+#        (白名单只作用于 fetch_preferred_ips() 拉外部源那一步, 显式清单根本不经过它,
+#         所以「给白名单开例外」这个说法本身不成立, 也不需要放宽任何防护。)
+#     2) 独立分组, 不混入主入口池 edge; 链式 / 极速 / 国家分组一律不受影响
+#     3) 默认关闭, 需显式设 THIRD_PARTY_ENABLED=1 才下发
+#     4) 同样过本机实测健康过滤 (entry_health.json), 结论缺失/过期按可用处理
+THIRD_PARTY_ENTRIES = [
+    "188.245.228.243:443",   # de, 本轮中位 9.72 Mbps
+    "91.132.163.187:8443",   # de, 本轮中位 9.47 Mbps
+    "141.98.41.80:443",      # us, 本轮中位 9.10 Mbps
+    "117.55.232.78:443",     # us, 本轮中位 8.80 Mbps (11-06 曾测 4.20)
+    "46.224.118.72:443",     # de, 本轮中位 7.71 Mbps
+    "158.247.220.241:443",   # kr, 本轮中位 5.98 Mbps
+]
+THIRD_PARTY_ENABLED = os.environ.get("THIRD_PARTY_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+THIRD_PARTY_LIMIT = max(0, int(os.environ.get("THIRD_PARTY_LIMIT", "6") or 6))
+
+
+def third_party_entries():
+    """本次要下发的第三方入口: 开关 + 上限 + 健康过滤。默认返回空列表。"""
+    if not THIRD_PARTY_ENABLED or THIRD_PARTY_LIMIT <= 0:
+        return []
+    pool = filter_dead_entries(list(THIRD_PARTY_ENTRIES[:THIRD_PARTY_LIMIT]))
+    print(f"[第三方入口] 试验组已开启, 下发 {len(pool)} 条 (非 CF 官方段, 元数据对方可见)")
+    return pool
+
+
 CF_IP_FALLBACK = [
     "104.18.58.130:443",
     "104.18.54.222:443",
@@ -925,7 +969,7 @@ def build_sub_text(data):
     edge = build_entry_pool("SUB_ENTRY", [f"{EDT_DOMAIN}:443"])
     lines = [
         "# edgetunnel 完整订阅 (vless://) —— 填进后台「订阅链接」URL",
-        f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
+        f"# 生成时间: {data['generated_at']} (定时构建每 6 小时一次, 平台可能延迟; 本机可随时手动触发刷新)",
         f"# 固定地址: {SUB_URL}",
         f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
         f"# 连接地址: {', '.join(edge)}",
@@ -998,6 +1042,18 @@ def build_sub_text(data):
             code = str(n.get("country_code") or "").upper()
             zh = COUNTRY_ZH.get(code) or code or "节点"
             lines.append(_build_direct_link(f"直出-CF站-{zh}-{i:02d}", e, proxyip=_next_proxyip()))
+
+    # 第三方反代试验组: 默认不出现, 需显式设 THIRD_PARTY_ENABLED=1。
+    # 单独成组是为了让「要不要承担元数据泄露风险」由使用者自己选, 而不是替他决定。
+    tp = third_party_entries()
+    tp = [e for e in tp if e not in edge]  # 与主入口池去重
+    if tp:
+        lines.append("")
+        lines.append("# ---- 直出-第三方试验 (非 CF 官方段 / 第三方 VPS 反代, 默认关闭) ----")
+        lines.append("# 同时段实测并不比 CF 官方段快, 仅作路径冗余; 对方可见 SNI 与流量元数据, 无 SLA")
+        lines.append("# 纯直出不带 proxyip, 不能用于 dash.cloudflare.com 等 CF 前置站 (平台回环保护)")
+        for i, e in enumerate(tp, 1):
+            lines.append(_build_direct_link(f"直出-第三方-{i:02d}", e))
 
     # 极速组: 按链路握手延迟升序取前 8 个, 不分国家/住宅机房 (追求速度优先用这组)
     all_nodes = [n for grp in countries.values() for n in grp["nodes"]]
