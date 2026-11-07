@@ -1,9 +1,12 @@
 name: VPN Gate Node Check
 
 on:
-  # 定时检测: 默认每 30 分钟一次。改成每 60 分钟: cron: "0 * * * *"
+  # 定时检测: 每 6 小时一次。
+  # 口径修正: 原先写 "*/30 * * * *" 是错的 —— GitHub 对免费仓库的高频计划任务会降频,
+  # 实测最近若干次定时构建间隔 7~8 小时, 配置与实际不符。低频 cron 通常能准点执行。
+  # 需要立刻刷新时, 在本机跑 `python trigger_build.py --force` 主动触发, 不占额外费用。
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -47,15 +50,28 @@ jobs:
           # 优选入口池构成 (脚本内部按本机实测排序):
           #   1) SUB_ENTRY 预设 (主力域名 + 自有域兜底)
           #   2) 本机实测域名 VERIFIED_DOMAINS (CloudflareSpeedTest + 端到端验证)
-          #   3) 本机实测优选 IP VERIFIED_IPS (SJC/LAX 段, 端到端 7.5~10.8 Mbps) <- 池子主力
+          #   3) 本机实测优选 IP VERIFIED_IPS (SJC/LAX 段) <- 池子主力
           #   4) 外部源兜底 (域名 1 个 + IP 2 个; 实测外部 IP 5/6 超时, 只垫底)
           #      IP 源全部走 CF 官方网段白名单校验, 拉取失败回退内置列表
           # 实测: 域名型入口跨轮极差 <2.6Mbps, IP 型入口极差可达 6.18Mbps, 故域名优先
           # 注意: CFST 的下载速度排名对本场景无预测力(r=0.424), 只有端到端实测过的才能进池
+          #
+          # 下发前剔除死入口: vpngate.py 读仓库根目录的 entry_health.json。
+          # 该文件由用户在本机跑 `python probe_entries.py --push` 生成并提交。
+          # 故意不在 CI 里直接探测 —— runner 在美国机房, 到 CF 边缘必然全绿,
+          # 而真正决定可用性的是「本机 -> CF 边缘」。结论超 24h 自动失效, 不过滤。
+          # 订阅直出分两组: 「非CF站」纯直出少一跳 / 「CF站」经 ProxyIP 中转绕回环保护。
           SUB_ENTRY: "www.speedtest.net:443,vpn.cnzxmdd.cc.cd:443"
           EDGE_HOSTS: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443"
           CF_IP_LIMIT: "2"
           CF_DOMAIN_LIMIT: "1"
+          # 第三方反代试验组: 默认关闭。以后想开, 在仓库
+          # 「设置 → Secrets and variables → Actions → Variables」加一条
+          # THIRD_PARTY_ENABLED = 1 即可, 不用改代码、不用重新推送;
+          # 改回 0 或删掉变量就关闭。THIRD_PARTY_LIMIT 控制下发条数 (默认 6)。
+          # 注意: 该组 IP 属第三方 VPS, 对方可见 SNI 与流量元数据, 启用前请知情。
+          THIRD_PARTY_ENABLED: ${{ vars.THIRD_PARTY_ENABLED || '0' }}
+          THIRD_PARTY_LIMIT: ${{ vars.THIRD_PARTY_LIMIT || '6' }}
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
