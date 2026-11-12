@@ -152,15 +152,11 @@ def probe_proxyip(entry, ip, tries=2):
 
 def push_to_github():
     """经 GitHub Contents API 提交 entry_health.json (git 协议在本机被阻断)。"""
-    p = subprocess.run(
-        ["git", "credential", "fill"],
-        input="protocol=https\nhost=github.com\n\n",
-        capture_output=True, text=True,
-    )
-    token = next((l.split("=", 1)[1].strip() for l in p.stdout.splitlines()
-                  if l.startswith("password=")), None)
+    sys.path.insert(0, REPO_DIR)
+    from gh_token import get_token
+    token, src = get_token()
     if not token:
-        raise RuntimeError("取不到 GitHub PAT (git credential fill)")
+        raise RuntimeError(f"取不到 GitHub 令牌: {src} (可临时设环境变量 GITHUB_TOKEN)")
 
     import urllib.error
     import urllib.request
