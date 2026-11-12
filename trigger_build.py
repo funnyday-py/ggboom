@@ -50,26 +50,15 @@ API = "https://api.github.com"
 TASK_NAME = "ggboom-sub-build"
 SCRIPT_PATH = os.path.abspath(__file__)
 SCRIPT_DIR = os.path.dirname(SCRIPT_PATH)
+sys.path.insert(0, SCRIPT_DIR)
+from gh_token import get_token  # noqa: E402  (三个脚本共用同一份令牌获取)
+
 PROBE_SCRIPT = os.path.join(SCRIPT_DIR, "probe_entries.py")
 HEALTH_FILE = os.path.join(SCRIPT_DIR, "entry_health.json")
 PYEXE = sys.executable
 
 
-def get_token():
-    """取令牌: 环境变量优先 (一次性), 否则读本机凭据管理器。不落盘。"""
-    t = os.environ.get("GITHUB_TOKEN", "").strip()
-    if t:
-        return t, "环境变量 GITHUB_TOKEN"
-    p = subprocess.run(
-        ["git", "credential", "fill"],
-        input="protocol=https\nhost=github.com\n\n",
-        capture_output=True, text=True,
-    )
-    t = next((l.split("=", 1)[1].strip() for l in p.stdout.splitlines()
-              if l.startswith("password=")), "")
-    if t:
-        return t, "本机凭据管理器"
-    return "", ""
+# get_token() 已抽到 gh_token.py, 三个脚本共用同一份实现 (环境变量优先)。
 
 
 def api(method, path, token, body=None):
