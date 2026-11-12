@@ -20,11 +20,24 @@
     python probe_entries.py --ttl-hours 48 # 调整结论有效期 (默认 24h)
 
 判定口径: 每个入口测 3 次, 至少 2 次走通完整链路才算可用 (抗单点抖动)。
-完整链路 = TCP -> TLS(SNI=Worker域) -> WS 101 -> VLESS 头 -> 隧道内 TLS 握手。
+完整链路 = TCP -> 边缘 TLS(SNI=Worker域) -> WS 101 -> VLESS 响应头校验 ->
+隧道内 TLS 握手 -> 拿到下行数据。
+
+2026-11-12 起用严格分层校验 (probe_lib.probe_link, strict=True):
+  - 握手按 RFC 6455 校验状态行 / Upgrade / Connection / Sec-WebSocket-Accept
+  - VLESS 响应头校验 version=0、剥离后必须是 TLS Handshake 记录
+  - WS 101 成功但收不到任何下行帧, 直接记为 downlink_zero, 不等它耗到超时
+  - 每次失败都带 stage, 写进 entry_health.json, 便于区分「入口挂了」和「目标站抖动」
+
+实测依据: 连判死的入口 (188.114.96.2) 也会返回完全合法的 101 + 正确的
+Sec-WebSocket-Accept, 所以 **WS 101 不能单独当可用性判据**; 它和正常入口的差别
+出现在「有没有 VLESS 响应头 + 隧道内 TLS 下行」这一层。旧版 ``if "101" in status``
+只判状态行子串, 会放过伪 101 和错误页。加 --no-strict 可退回旧口径做对照。
 
 ProxyIP 中转池另判: 它是 **Worker (CF 机房)** 去连的, 不是本机连的;
 用本机 TCP 直连判定会把「GFW 拦了但 Worker 能连」的中转误剔除,
-所以改为经已验证入口在隧道里访问 CF 自家站, 拿到 HTTP 200 才算可用。
+所以改为经已验证入口在隧道里访问 CF 自家站, 拿到 HTTP 200 才算可用
+(该判定沿用非严格模式, 不因入口探针升级而改变)。
 """
 import argparse
 import base64
@@ -87,23 +100,12 @@ def parse_entry(s):
     return (host, int(port))
 
 
-def probe_once(entry):
-    """完整链路判定; 成功返回 True。不下载数据, 因此不受带宽/并发影响。"""
-    ws = None
-    try:
-        ws = probe_lib.WS(PATH, entry=entry, timeout=TIMEOUT)
-        tls = probe_lib.TunnelTLS(ws, TARGET)
-        ws.send(probe_lib.vless_header(TARGET, 443) + tls.first_flight)
-        tls.handshake()
-        return True, ""
-    except Exception as e:
-        return False, f"{type(e).__name__}: {str(e)[:50]}"
-    finally:
-        try:
-            if ws and getattr(ws, "s", None):
-                ws.s.close()
-        except Exception:
-            pass
+def probe_once(entry, strict=True):
+    """一次严格分层链路判定, 返回结构化结论 dict (不抛异常)。
+
+    strict=False 时退回旧口径 (只看 101 状态行 + 隧道内 TLS 握手), 用于对照回归。
+    """
+    return probe_lib.probe_link(entry, PATH, TARGET, timeout=TIMEOUT, strict=strict)
 
 
 def probe_proxyip(entry, ip, tries=2):
@@ -192,7 +194,10 @@ def main():
     ap.add_argument("--push", action="store_true", help="测完直接提交到 GitHub")
     ap.add_argument("--ttl-hours", type=int, default=24, help="结论有效期 (默认 24 小时)")
     ap.add_argument("--no-proxyip", action="store_true", help="跳过 ProxyIP 中转池探测")
+    ap.add_argument("--no-strict", action="store_true",
+                    help="退回旧口径 (只判 101 状态行 + 隧道内 TLS), 用于对照回归")
     args = ap.parse_args()
+    strict = not args.no_strict
 
     if args.entries:
         entries = [x.strip() for x in args.entries.split(",") if x.strip()]
@@ -207,21 +212,31 @@ def main():
         print(f"入口过多 ({len(entries)}), 只测前 40 个", flush=True)
         entries = entries[:40]
 
-    print(f"口径: 每入口 {TRIES} 次, >={NEED} 次走通完整 VLESS-WS-TLS 隧道才算可用; 串行测", flush=True)
+    print(f"口径: 每入口 {TRIES} 次, >={NEED} 次走通完整链路才算可用; "
+          f"{'严格分层校验' if strict else '旧口径(对照)'}; 串行测", flush=True)
     print("-" * 78, flush=True)
     results = {}
     for e in entries:
-        oks, errs, t0 = 0, [], time.time()
+        oks, errs, stages, evidence, t0 = 0, [], {}, "", time.time()
         for _ in range(TRIES):
-            ok, err = probe_once(parse_entry(e))
-            if ok:
+            info = probe_once(parse_entry(e), strict=strict)
+            if info["ok"]:
                 oks += 1
+                if not evidence:
+                    evidence = (f"vless={info['vless_hdr']} "
+                                f"down={info['downlink_bytes']}B")
             else:
-                errs.append(err)
+                st = info["stage"]
+                stages[st] = stages.get(st, 0) + 1
+                errs.append(f"[{st}] {info['detail']}"[:110])
         alive = oks >= NEED
-        results[e] = {"ok": alive, "pass": oks, "tries": TRIES, "errors": errs[:2]}
+        rec = {"ok": alive, "pass": oks, "tries": TRIES,
+               "errors": errs[:2], "stages": stages}
+        if evidence:
+            rec["evidence"] = evidence
+        results[e] = rec
         print(f"  {'可用' if alive else '剔除'}  {e:32s}  {oks}/{TRIES}  "
-              f"{time.time()-t0:4.1f}s  {errs[0] if errs else ''}", flush=True)
+              f"{time.time()-t0:4.1f}s  {errs[0] if errs else evidence}", flush=True)
 
     proxyips = {}
     if not args.no_proxyip:
@@ -239,7 +254,10 @@ def main():
     data = {
         "generated_at": dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds"),
         "ttl_hours": args.ttl_hours,
-        "judge": "本机连通性判定 (VLESS-WS 隧道内 TLS 握手); 不做速度排名",
+        "judge": ("本机严格分层链路判定 (RFC6455 握手头 + VLESS 响应头内容 + "
+                  "隧道内 TLS 下行); 不做速度排名" if strict else
+                  "本机连通性判定 (旧口径, 仅 101 状态行 + 隧道内 TLS 握手); 对照用"),
+        "strict": strict,
         "tries": TRIES,
         "need": NEED,
         "entries": results,
