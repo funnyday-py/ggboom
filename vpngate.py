@@ -546,9 +546,22 @@ _PROXYIP_CURSOR = [0]
 HEALTH_FILE = os.path.join(REPO_DIR, "entry_health.json")
 _health_cache = False  # False = 尚未加载; dict = 有效结论; {} = 无有效结论
 
+# 分级过期阈值。旧逻辑「age > ttl 就返回 {}」等于一过期就全量不过滤,
+# 已知判死的入口会原地复活, 比用一份稍旧的结论更糟。这里把 ttl_hours 改作
+# 「新鲜度提示」: 软过期仍沿用最后一次实测, 只在超过硬上限时放弃,
+# 避免某次抖动造成的误判被无限期锁死。
+HEALTH_HARD_EXPIRE_HOURS = float(os.environ.get("HEALTH_HARD_EXPIRE_HOURS", "168"))
+
 
 def load_entry_health():
-    """读本机实测结论; 结论过期/文件缺失/解析失败一律返回 {}, 即不过滤 (冷启动保护)。"""
+    """读本机实测结论, 分级过期。
+
+    - 新鲜 (<= ttl_hours): 正常使用
+    - 软过期 (ttl_hours ~ 硬上限, 默认 7 天): 仍沿用最后一次结论并打印警告。
+      剔除一个入口只是少一条路径, 放回死入口则会实打实拉低可用率,
+      所以探针没及时跑时, 沿用旧结论是更安全的降级。
+    - 硬过期 / 文件缺失 / 解析失败 / 结构不完整: 返回 {}, 即不过滤 (冷启动保护)。
+    """
     global _health_cache
     if _health_cache is not False:
         return _health_cache
@@ -557,14 +570,28 @@ def load_entry_health():
         with open(HEALTH_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
         gen = datetime.fromisoformat(d["generated_at"])
+        if gen.tzinfo is None:                 # 兼容早期无时区标记的旧数据
+            gen = gen.replace(tzinfo=timezone.utc)
         ttl = float(d.get("ttl_hours", 24))
         age_h = (datetime.now(timezone.utc) - gen.astimezone(timezone.utc)).total_seconds() / 3600
-        if age_h > ttl:
-            print(f"[入口健康] 结论已过期 ({age_h:.1f}h > {ttl:.0f}h), 本次不过滤")
+        if age_h < 0:
+            print(f"[入口健康] 生成时间晚于当前时间 ({age_h:.1f}h), 本机时钟可能有偏差; 仍按结论使用")
+            age_h = 0.0
+        entries = d.get("entries")
+        if not isinstance(entries, dict) or not entries:
+            print("[入口健康] 无有效入口结论, 本次不过滤")
             return _health_cache
+        if age_h > HEALTH_HARD_EXPIRE_HOURS:
+            print(f"[入口健康] 结论已硬过期 ({age_h:.1f}h > {HEALTH_HARD_EXPIRE_HOURS:.0f}h), "
+                  "本次不过滤; 请运行 probe_entries.py --push 刷新")
+            return _health_cache
+        n_e, n_p = len(entries), len(d.get("proxyips", {}) or {})
+        if age_h > ttl:
+            print(f"[入口健康] 结论已过期 {age_h:.1f}h (> {ttl:.0f}h), 仍沿用最后一次实测: "
+                  f"{n_e} 个入口 / {n_p} 个中转; 建议跑 probe_entries.py --push 刷新")
+        else:
+            print(f"[入口健康] 载入 {age_h:.1f}h 前的本机实测: {n_e} 个入口 / {n_p} 个中转")
         _health_cache = d
-        print(f"[入口健康] 载入 {age_h:.1f}h 前的本机实测: "
-              f"{len(d.get('entries', {}))} 个入口 / {len(d.get('proxyips', {}))} 个中转")
     except FileNotFoundError:
         print("[入口健康] 无 entry_health.json, 本次不过滤 (本机跑 probe_entries.py 可生成)")
     except Exception as e:
