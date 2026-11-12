@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-12T11:41:29+08:00",
+ "generated_at": "2026-11-12T12:06:04+08:00",
  "ttl_hours": 24,
  "judge": "本机严格分层链路判定 (RFC6455 握手头 + VLESS 响应头内容 + 隧道内 TLS 下行); 不做速度排名",
  "strict": true,
@@ -15,14 +15,15 @@
    "evidence": "vless=0000 down=5878B"
   },
   "vpn.cnzxmdd.cc.cd:443": {
-   "ok": true,
-   "pass": 2,
+   "ok": false,
+   "pass": 1,
    "tries": 3,
    "errors": [
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
     "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
    ],
    "stages": {
-    "tls_edge": 1
+    "tls_edge": 2
    },
    "evidence": "vless=0000 down=5878B"
   },
@@ -49,16 +50,17 @@
   },
   "cloudflare.seeck.cn:443": {
    "ok": false,
-   "pass": 1,
+   "pass": 0,
    "tries": 3,
    "errors": [
-    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
-    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
+    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError",
+    "[ws_upgrade] 等待 WS 升级响应失败: TimeoutError"
    ],
    "stages": {
-    "tls_edge": 2
-   },
-   "evidence": "vless=0000 down=5878B"
+    "downlink_zero": 1,
+    "ws_upgrade": 1,
+    "tls_edge": 1
+   }
   },
   "104.18.58.130:443": {
    "ok": true,
@@ -127,11 +129,11 @@
    "pass": 1,
    "tries": 3,
    "errors": [
-    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError",
-    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError"
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
    ],
    "stages": {
-    "downlink_zero": 2
+    "tls_edge": 2
    },
    "evidence": "vless=0000 down=5878B"
   }
