@@ -1,10 +1,11 @@
 name: VPN Gate Node Check
 
 on:
-  # 定时检测: 每 6 小时一次。
-  # 口径修正: 原先写 "*/30 * * * *" 是错的 —— GitHub 对免费仓库的高频计划任务会降频,
-  # 实测最近若干次定时构建间隔 7~8 小时, 配置与实际不符。低频 cron 通常能准点执行。
-  # 需要立刻刷新时, 在本机跑 `python trigger_build.py --force` 主动触发, 不占额外费用。
+  # 定时检测: 配置每 6 小时一次, 但 GitHub 对免费仓库的 schedule 仍会降频。
+  # 实测改成 6h 后间隔为 7~9 小时 (11-07 两次 7.19h / 8.94h, 00:00、06:00 UTC
+  # 应跑时点没有 run)。配置写 6h 只为让意图明确, 实际频率以历史 run 时间戳为准。
+  # 需要立刻刷新时, 在本机跑 `python trigger_build.py --with-probe`
+  # (全量探测入口 -> 推健康数据 -> 立即构建); 只想构建可加 --force。
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
@@ -59,7 +60,8 @@ jobs:
           # 下发前剔除死入口: vpngate.py 读仓库根目录的 entry_health.json。
           # 该文件由用户在本机跑 `python probe_entries.py --push` 生成并提交。
           # 故意不在 CI 里直接探测 —— runner 在美国机房, 到 CF 边缘必然全绿,
-          # 而真正决定可用性的是「本机 -> CF 边缘」。结论超 24h 自动失效, 不过滤。
+          # 而真正决定可用性的是「本机 -> CF 边缘」。结论超 24h 只是提示刷新,
+          # 仍沿用最后一次实测; 超过硬上限则只保留判死项, 不会把死入口放回订阅。
           # 订阅直出分两组: 「非CF站」纯直出少一跳 / 「CF站」经 ProxyIP 中转绕回环保护。
           SUB_ENTRY: "www.speedtest.net:443,vpn.cnzxmdd.cc.cd:443"
           EDGE_HOSTS: "www.speedtest.net:443,www.postman.com:443,www.ox.ac.uk:443"
