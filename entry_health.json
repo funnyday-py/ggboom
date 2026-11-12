@@ -1,7 +1,8 @@
 {
- "generated_at": "2026-11-06T23:04:32+08:00",
+ "generated_at": "2026-11-12T11:41:29+08:00",
  "ttl_hours": 24,
- "judge": "本机连通性判定 (VLESS-WS 隧道内 TLS 握手); 不做速度排名",
+ "judge": "本机严格分层链路判定 (RFC6455 握手头 + VLESS 响应头内容 + 隧道内 TLS 下行); 不做速度排名",
+ "strict": true,
  "tries": 3,
  "need": 2,
  "entries": {
@@ -9,91 +10,130 @@
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "vpn.cnzxmdd.cc.cd:443": {
-   "ok": false,
-   "pass": 0,
+   "ok": true,
+   "pass": 2,
    "tries": 3,
    "errors": [
-    "TimeoutError: The read operation timed out",
-    "TimeoutError: The read operation timed out"
-   ]
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
+   ],
+   "stages": {
+    "tls_edge": 1
+   },
+   "evidence": "vless=0000 down=5878B"
   },
   "www.postman.com:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "www.ox.ac.uk:443": {
-   "ok": true,
-   "pass": 3,
+   "ok": false,
+   "pass": 1,
    "tries": 3,
-   "errors": []
+   "errors": [
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
+   ],
+   "stages": {
+    "tls_edge": 2
+   },
+   "evidence": "vless=0000 down=5878B"
   },
   "cloudflare.seeck.cn:443": {
    "ok": false,
    "pass": 1,
    "tries": 3,
    "errors": [
-    "TimeoutError: _ssl.c:1015: The handshake operation timed out",
-    "TimeoutError: _ssl.c:1015: The handshake operation timed out"
-   ]
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out"
+   ],
+   "stages": {
+    "tls_edge": 2
+   },
+   "evidence": "vless=0000 down=5878B"
   },
   "104.18.58.130:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "104.18.54.222:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "162.159.237.185:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "104.18.62.183:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "162.159.237.219:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "172.64.79.226:443": {
    "ok": true,
    "pass": 3,
    "tries": 3,
-   "errors": []
+   "errors": [],
+   "stages": {},
+   "evidence": "vless=0000 down=5878B"
   },
   "188.114.96.5:443": {
    "ok": false,
    "pass": 1,
    "tries": 3,
    "errors": [
-    "TimeoutError: The read operation timed out",
-    "TimeoutError: The read operation timed out"
-   ]
+    "[tls_edge] TimeoutError: _ssl.c:1015: The handshake operation timed out",
+    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError"
+   ],
+   "stages": {
+    "tls_edge": 1,
+    "downlink_zero": 1
+   },
+   "evidence": "vless=0000 down=5878B"
   },
   "188.114.96.2:443": {
    "ok": false,
-   "pass": 0,
+   "pass": 1,
    "tries": 3,
    "errors": [
-    "TimeoutError: _ssl.c:1015: The handshake operation timed out",
-    "TimeoutError: The read operation timed out"
-   ]
+    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError",
+    "[downlink_zero] WS 101 已建立但无下行帧: TimeoutError"
+   ],
+   "stages": {
+    "downlink_zero": 2
+   },
+   "evidence": "vless=0000 down=5878B"
   }
  },
  "proxyips": {
