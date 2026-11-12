@@ -412,16 +412,16 @@ CHAIN_URL = os.environ.get("CHAIN_URL", "https://funnyday-py.github.io/ggboom/ch
 
 def build_chains_text(data):
     """生成 edgetunnel 链式代理清单: 按国家分组, 每国编号固定, 住宅优先, 延迟升序。
-    每行 = 「名字 + $sstp://vpn:vpn@host:port」, 名字不变, 指令每 30 分钟自动换。"""
+    每行 = 「名字 + $sstp://vpn:vpn@host:port」, 名字不变, 指令随构建更新 (约 6 小时)。"""
     countries = data["countries"]
     lines = [
         "# VPN Gate SSTP 节点 -> edgetunnel 链式代理清单",
-        f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
+        f"# 自动更新: {data['generated_at']} (定时构建每 6 小时一次, 平台可能延迟)",
         f"# 固定地址: {CHAIN_URL}",
         "#",
         "# 用法: 在 edgetunnel 节点备注里直接粘贴下面任意一行 (名字与指令连写)",
         "#   例: 日本-住宅-01$sstp://vpn:vpn@vpnxxx.opengw.net:443",
-        "# 名字保持不变, 只有 $sstp:// 后面的地址每 30 分钟自动更换",
+        "# 名字保持不变, 只有 $sstp:// 后面的地址随每次构建更换",
         "# 账号密码固定 vpn:vpn ; 端口必须保留",
         "# ========================================================",
     ]
@@ -544,28 +544,42 @@ _PROXYIP_CURSOR = [0]
 # 同理, 这里只剔除「明确判死」的, 不做速度排序 —— 速度是本机+时段专属,
 # 把它写进仓库给 CI 读, 只会把偶然值固化成错误结论 (CFST r=0.424 的教训)。
 HEALTH_FILE = os.path.join(REPO_DIR, "entry_health.json")
-_health_cache = False  # False = 尚未加载; dict = 有效结论; {} = 无有效结论
+_health_cache = False  # False = 尚未加载/已失效; dict = 有效结论 (含 _loaded_at)
 
 # 分级过期阈值。旧逻辑「age > ttl 就返回 {}」等于一过期就全量不过滤,
 # 已知判死的入口会原地复活, 比用一份稍旧的结论更糟。这里把 ttl_hours 改作
-# 「新鲜度提示」: 软过期仍沿用最后一次实测, 只在超过硬上限时放弃,
-# 避免某次抖动造成的误判被无限期锁死。
+# 「新鲜度提示」: 软过期仍沿用最后一次实测; 硬过期只保留负面结论,
+# 既不无限期锁死抖动误判, 也不会把已知死入口放回订阅。
 HEALTH_HARD_EXPIRE_HOURS = float(os.environ.get("HEALTH_HARD_EXPIRE_HOURS", "168"))
+# 长驻进程里每隔 60 秒重读一次, 让 age / 软硬过期随时间推进重新计算。
+HEALTH_CACHE_RELOAD_SECONDS = 60
 
 
 def load_entry_health():
     """读本机实测结论, 分级过期。
 
     - 新鲜 (<= ttl_hours): 正常使用
-    - 软过期 (ttl_hours ~ 硬上限, 默认 7 天): 仍沿用最后一次结论并打印警告。
+    - 软过期 (ttl_hours ~ 硬上限): 仍沿用最后一次结论并提示刷新。
       剔除一个入口只是少一条路径, 放回死入口则会实打实拉低可用率,
       所以探针没及时跑时, 沿用旧结论是更安全的降级。
-    - 硬过期 / 文件缺失 / 解析失败 / 结构不完整: 返回 {}, 即不过滤 (冷启动保护)。
+    - 硬过期 (> max(168h, ttl*2)): **只保留负面结论** —— ok=false 的入口
+      与值为 False 的中转继续剔除, 其余按「未知/可用」处理。旧做法返回 {}
+      会让已知判死入口原地复活, 与上面的代价判据直接矛盾。硬上限随 ttl
+      联动, 保证「软过期沿用」区间永远先于硬过期出现。
+    - 文件缺失 / 解析失败 / 结构不完整: 返回 {} 不过滤 (冷启动保护);
+      解析失败会同时打 GitHub Actions 警告注解, 不再静默通过。
+    - 失败结论不写缓存, 文件补好后下次调用会重新读。
     """
     global _health_cache
-    if _health_cache is not False:
-        return _health_cache
-    _health_cache = {}
+    if isinstance(_health_cache, dict):
+        if time.time() - _health_cache.get("_loaded_at", 0) < HEALTH_CACHE_RELOAD_SECONDS:
+            return _health_cache
+        _health_cache = False
+
+    def finish(d):
+        d["_loaded_at"] = time.time()
+        return d
+
     try:
         with open(HEALTH_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -573,30 +587,62 @@ def load_entry_health():
         if gen.tzinfo is None:                 # 兼容早期无时区标记的旧数据
             gen = gen.replace(tzinfo=timezone.utc)
         ttl = float(d.get("ttl_hours", 24))
+        if ttl <= 0:
+            raise ValueError("ttl_hours 必须为正数")
+        hard = max(HEALTH_HARD_EXPIRE_HOURS, ttl * 2)
         age_h = (datetime.now(timezone.utc) - gen.astimezone(timezone.utc)).total_seconds() / 3600
         if age_h < 0:
             print(f"[入口健康] 生成时间晚于当前时间 ({age_h:.1f}h), 本机时钟可能有偏差; 仍按结论使用")
             age_h = 0.0
         entries = d.get("entries")
-        if not isinstance(entries, dict) or not entries:
-            print("[入口健康] 无有效入口结论, 本次不过滤")
+        proxyips = d.get("proxyips") or {}
+        if not isinstance(entries, dict) or not entries or not isinstance(proxyips, dict):
+            print("[入口健康] 无有效入口/中转结论, 本次不过滤")
+            print("::warning title=entry_health.json::入口/中转结论缺失或结构不对; 本次不过滤")
+            return {}
+        if age_h > hard:
+            dead = {k: v for k, v in entries.items() if _is_dead(v)}
+            dead_px = {k: v for k, v in proxyips.items() if v is False}
+            print(f"[入口健康] 结论已硬过期 ({age_h:.1f}h > {hard:.0f}h), "
+                  f"仅保留 {len(dead)} 个判死入口 / {len(dead_px)} 个判死中转, "
+                  "其余按未知处理; 请运行 probe_entries.py --push 刷新")
+            _health_cache = finish({"generated_at": d["generated_at"], "ttl_hours": ttl,
+                                    "entries": dead, "proxyips": dead_px, "expired": True})
             return _health_cache
-        if age_h > HEALTH_HARD_EXPIRE_HOURS:
-            print(f"[入口健康] 结论已硬过期 ({age_h:.1f}h > {HEALTH_HARD_EXPIRE_HOURS:.0f}h), "
-                  "本次不过滤; 请运行 probe_entries.py --push 刷新")
-            return _health_cache
-        n_e, n_p = len(entries), len(d.get("proxyips", {}) or {})
+        n_e, n_p = len(entries), len(proxyips)
+        if ttl * 2 > HEALTH_HARD_EXPIRE_HOURS:
+            print(f"[入口健康] 自定义有效期 {ttl:.0f}h, 硬上限联动为 {hard:.0f}h")
         if age_h > ttl:
             print(f"[入口健康] 结论已过期 {age_h:.1f}h (> {ttl:.0f}h), 仍沿用最后一次实测: "
                   f"{n_e} 个入口 / {n_p} 个中转; 建议跑 probe_entries.py --push 刷新")
         else:
             print(f"[入口健康] 载入 {age_h:.1f}h 前的本机实测: {n_e} 个入口 / {n_p} 个中转")
-        _health_cache = d
+        _health_cache = finish(d)
+        return _health_cache
     except FileNotFoundError:
         print("[入口健康] 无 entry_health.json, 本次不过滤 (本机跑 probe_entries.py 可生成)")
+    except json.JSONDecodeError as e:
+        # JSONDecodeError 是 ValueError 子类, 必须排在下面那条之前单独归类:
+        # 「文件写坏了」和「字段值不对」的排查动作完全不同, 不该混成一句。
+        print(f"[入口健康] 读取失败: entry_health.json 不是合法 JSON: {e}")
+        print(f"::warning title=entry_health.json::JSON 语法错误 ({e}); 本次不过滤")
+    except (KeyError, ValueError, TypeError) as e:
+        print(f"[入口健康] 健康数据字段异常: {type(e).__name__}: {e}")
+        print(f"::warning title=entry_health.json::字段解析失败 ({type(e).__name__}: {e}); 本次不过滤")
     except Exception as e:
-        print(f"[入口健康] 读取失败 ({type(e).__name__}), 本次不过滤")
-    return _health_cache
+        print(f"[入口健康] 读取失败: {type(e).__name__}: {e}")
+        print(f"::warning title=entry_health.json::读取失败 ({type(e).__name__}: {e}); 本次不过滤")
+    return {}
+
+
+def _is_dead(rec):
+    """只有「明确的 ok=false 字典结论」才算判死。
+
+    entry_health.json 由本机脚本生成, 但历史上出现过手工编辑 / 半写入,
+    单条值可能是 null、布尔或字符串。旧写法 judged.get(e, {}).get("ok")
+    遇到非字典会 AttributeError, 直接把整次构建打挂; 这里统一按「未知=可用」。
+    """
+    return isinstance(rec, dict) and rec.get("ok") is False
 
 
 def filter_dead_entries(pool):
@@ -605,7 +651,7 @@ def filter_dead_entries(pool):
     judged = health.get("entries", {})
     if not judged:
         return pool
-    alive = [e for e in pool if judged.get(e, {}).get("ok", True)]
+    alive = [e for e in pool if not _is_dead(judged.get(e))]
     dropped = [e for e in pool if e not in alive]
     if not alive:
         print("[入口健康] 剔除后入口池为空, 整体回退 (避免生成空订阅)")
@@ -616,12 +662,15 @@ def filter_dead_entries(pool):
 
 
 def alive_proxyips():
-    """中转池同样按本机实测剔除; 未测过 / 全死 时回退完整池。"""
+    """中转池同样按本机实测剔除; 未测过 / 全死 时回退完整池。
+
+    与入口池口径统一: 只有值为 False 才剔除, null / 0 / 空串按未知处理。
+    """
     health = load_entry_health()
     judged = health.get("proxyips", {})
     if not judged:
         return PROXYIP_POOL
-    alive = [ip for ip in PROXYIP_POOL if judged.get(ip, True)]
+    alive = [ip for ip in PROXYIP_POOL if judged.get(ip) is not False]
     return alive or PROXYIP_POOL
 
 
@@ -899,18 +948,18 @@ def build_entry_pool(env_name: str, fallback):
 
 def build_hosts_text(data):
     """生成可直接粘贴到 edgetunnel 后台「自定义优选IP」框的清单。
-    每行 = 入口地址#名字$sstp://... ; 名字固定, 底下 SSTP 节点每 30 分钟自动换。"""
+    每行 = 入口地址#名字$sstp://... ; 名字固定, 底下 SSTP 节点随构建更新 (约 6 小时)。"""
     countries = data["countries"]
     # 入口: 默认用实测可用优选域名循环分配; 可用 HOSTS_ENTRY 覆盖(逗号分隔), 并自动追加优选 IP
     edge = build_entry_pool("HOSTS_ENTRY", EDGE_HOSTS or [f"{EDT_DOMAIN}:443"])
     lines = [
         "# edgetunnel「自定义优选IP」清单 (整段复制, 追加到后台现有内容后面)",
-        f"# 自动更新: {data['generated_at']} (每 30 分钟重新检测)",
+        f"# 自动更新: {data['generated_at']} (定时构建每 6 小时一次, 平台可能延迟)",
         f"# 固定地址: {HOSTS_URL}",
         "# 每行 = 入口地址#名字$sstp://vpn:vpn@节点:端口",
         "# 入口池 = 预设入口 + 本机实测域名 + 外部优选域名 + 优选 IP(国别分散)",
         "# 名字 = 国家-住宅/机房-编号, 直接区分住宅与机房",
-        "# 名字固定; 只有 $sstp:// 后面的节点地址每 30 分钟自动更换",
+        "# 名字固定; 只有 $sstp:// 后面的节点地址随每次构建更换",
         "# 账号密码固定 vpn:vpn ; 节点端口必须保留",
         "# ========================================================",
     ]
@@ -994,15 +1043,20 @@ def build_sub_text(data):
     countries = data["countries"]
     _sub_entry = os.environ.get("SUB_ENTRY", "").strip()
     edge = build_entry_pool("SUB_ENTRY", [f"{EDT_DOMAIN}:443"])
+    # CF站直出组与第三方组的地址同样要过健康过滤。提前算好供「头部说明」与
+    # 「实际下发」共用, 避免头部只列 edge、链接里却还有另一批地址。
+    verified_ips = filter_dead_entries(fetch_verified_ips())
+    tp = [e for e in third_party_entries() if e not in edge]
+    all_addrs = list(dict.fromkeys(edge + verified_ips + tp))
     lines = [
         "# edgetunnel 完整订阅 (vless://) —— 填进后台「订阅链接」URL",
         f"# 生成时间: {data['generated_at']} (定时构建每 6 小时一次, 平台可能延迟; 本机可随时手动触发刷新)",
         f"# 固定地址: {SUB_URL}",
         f"# Worker 域名: {EDT_DOMAIN} (ws / TLS / fingerprint {EDT_FINGERPRINT})",
-        f"# 连接地址: {', '.join(edge)}",
+        f"# 连接地址: {', '.join(all_addrs)}",
         "# 直出分两组: 「非CF站」纯直出少一跳; 「CF站」经 ProxyIP 中转绕平台回环保护",
-        "# 两组出口都是 CF 共享 IP (部分站点会风控); 链式组随后, $sstp:// 中继编码在 path",
-        "# 账号密码固定 vpn:vpn ; 节点端口已编码进 path",
+        "# 两组出口都是 CF 共享 IP (部分站点会风控); 链式组随后",
+        "# 直出组用 UUID 认证、不经中继; 链式组账号密码固定 vpn:vpn, 节点端口编码在 path",
         "# ========================================================",
     ]
     ordered = sorted(
@@ -1058,8 +1112,8 @@ def build_sub_text(data):
     # 直出-CF站组: 用实测优选 IP 为每个节点生成带 ProxyIP 中转的直出链接。
     # 起因 (2026-10-23): VPN Gate 的 opengw.net 中继批量失效 (DNS 还解析得到 AWS IP 54.76.135.1,
     # 但 TCP 全超时), 链式组 0/20 可用; 此时直出是唯一能用的组, 需要足够的节点量顶替。
-    # 用实测最优的 VERIFIED_IPS 循环分配, 保证每条链路都有较好的入口。
-    verified_ips = fetch_verified_ips()
+    # 用实测优选 IP 循环分配, 并同样按本机实测剔除判死入口 (与 edge 口径一致)。
+    # verified_ips 已在函数开头算好。
     if verified_ips:
         lines.append("")
         lines.append("# ---- 直出-CF站 (经 ProxyIP 中转; dash.cloudflare.com 等 CF 自家站用这组) ----")
@@ -1072,8 +1126,7 @@ def build_sub_text(data):
 
     # 第三方反代试验组: 默认不出现, 需显式设 THIRD_PARTY_ENABLED=1。
     # 单独成组是为了让「要不要承担元数据泄露风险」由使用者自己选, 而不是替他决定。
-    tp = third_party_entries()
-    tp = [e for e in tp if e not in edge]  # 与主入口池去重
+    # tp 已在函数开头算好 (默认关闭, 且已与主入口池去重)。
     if tp:
         lines.append("")
         lines.append("# ---- 直出-第三方试验 (非 CF 官方段 / 第三方 VPS 反代, 默认关闭) ----")
